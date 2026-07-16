@@ -26,5 +26,13 @@ ${usageContext}
 ${emojis.length} emoji, fallback + id + ready snippet: [references/emoji-catalog.md](references/emoji-catalog.md)
 
 Pick by fallback character, then copy the emoji-id exactly — IDs are long numeric strings and must not be altered.
+
+## Code modules
+
+Ready-to-copy maps of fallback → emoji IDs with a \`tg-emoji\` helper:
+
+- Go: [references/lib/emoji.go](references/lib/emoji.go)
+- Python: [references/lib/emoji.py](references/lib/emoji.py)
+- TypeScript: [references/lib/emoji.ts](references/lib/emoji.ts)
 `;
 }

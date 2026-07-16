@@ -3,10 +3,12 @@ import { config } from "../config.js";
 import type { MyContext } from "./context.js";
 import { registerStartHandlers } from "./handlers/start.js";
 import { registerPackInputHandlers } from "./handlers/packInput.js";
+import { registerAdminHandlers } from "./handlers/admin.js";
 
 export const bot = new Bot<MyContext>(config.BOT_TOKEN);
 
 registerStartHandlers(bot);
+registerAdminHandlers(bot);
 registerPackInputHandlers(bot);
 
 bot.catch((err) => {
