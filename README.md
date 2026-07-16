@@ -34,10 +34,10 @@ npm start        # tsx, no watch
 
 No build step, no webhook server — long polling only.
 
-## Deploy (systemd, `root@103.214.69.38`)
+## Deploy (systemd, `user@1ip`)
 
 ```bash
-ssh root@103.214.69.38
+ssh user@ip
 node -v            # need Node 22+ (built-in node:sqlite, no native build)
 mkdir -p /opt/premium-skill-tg
 # from your machine: rsync -av --exclude node_modules --exclude data --exclude .env \
