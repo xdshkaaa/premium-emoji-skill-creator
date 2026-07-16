@@ -155,11 +155,11 @@ async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Pr
   }
 }
 
-export async function retryPublish(skillId: number, ctx: MyContext): Promise<void> {
+export async function retryPublish(skillId: number, ctx: MyContext): Promise<boolean> {
   const skillRow = getSkillById(skillId);
   if (!skillRow) {
     await ctx.reply(`${E.warn} Скилл не найден.`, { ...HTML, reply_markup: backToMenuKeyboard() });
-    return;
+    return false;
   }
   const allEmojis = getEmojisForSkill(skillId);
   const skillMd = renderSkillMd(skillRow, allEmojis);
@@ -179,8 +179,10 @@ export async function retryPublish(skillId: number, ctx: MyContext): Promise<voi
       `${E.check} Скилл «${skillRow.title}» опубликован.\n\nУстановка:\n<code>npx skills add ${installUrl(skillRow.github_path)}</code>`,
       { ...HTML, reply_markup: backToMenuKeyboard() },
     );
+    return true;
   } catch (err) {
     console.error("Retry publish failed:", err);
     await ctx.reply(`${E.warn} Снова не получилось.`, { ...HTML, reply_markup: retryPublishKeyboard(skillId) });
+    return false;
   }
 }

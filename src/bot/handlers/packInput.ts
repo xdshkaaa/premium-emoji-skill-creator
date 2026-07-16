@@ -1,7 +1,7 @@
 import type { Bot } from "grammy";
 import type { MyContext } from "../context.js";
-import { extractAddEmojiSetName, extractCustomEmojiIds } from "../../telegram/extract.js";
-import { resolveEmojiSet, resolveCustomEmojiStickers } from "../../telegram/stickers.js";
+import { extractAddEmojiSetName } from "../../telegram/extract.js";
+import { resolveEmojiSet } from "../../telegram/stickers.js";
 import { processPack, retryPublish, type PackPayload } from "../flow/buildSkill.js";
 import { requestCancel, isRunning } from "../flow/cancellation.js";
 import { upsertUser } from "../../db/repo.js";
@@ -59,24 +59,8 @@ export function registerPackInputHandlers(bot: Bot<MyContext>): void {
       return;
     }
 
-    const customEmojiIds = extractCustomEmojiIds(ctx.message);
-    if (customEmojiIds.length > 0) {
-      const stickers = await resolveCustomEmojiStickers(bot, customEmojiIds);
-      if (stickers.length === 0) {
-        await ctx.reply(`${E.warn} Не смог распознать эти эмодзи. Пришли ссылку на пак вместо этого.`, HTML);
-        return;
-      }
-      const payload: PackPayload = {
-        setName: null,
-        packTitle: "Эмодзи из сообщения",
-        stickers,
-      };
-      await processPack(ctx, payload);
-      return;
-    }
-
     await ctx.reply(
-      `${E.eyes} Пришли ссылку на пак вида https://t.me/addemoji/ИмяПака, или сообщение с премиум-эмодзи. /help — подробности.`,
+      `${E.eyes} Принимаю только ссылки на пак вида https://t.me/addemoji/ИмяПака. Одиночные эмодзи не подходят — пришли ссылку на весь пак.`,
       HTML,
     );
   });
