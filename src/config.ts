@@ -8,6 +8,11 @@ const envSchema = z.object({
     .regex(/^[^/\s]+\/[^/\s]+$/, "GITHUB_SKILLS_REPO must be owner/repo"),
   DB_PATH: z.string().default("data/bot.sqlite"),
   ADMIN_TG_ID: z.coerce.number().int().positive().optional(),
+  AI_API_KEY: z.string().optional(),
+  AI_BASE_URL: z.string().url().default("https://cheapvibecode.ru/v1"),
+  AI_MODEL: z.string().default("mimo-v2.5"),
+  FFMPEG_PATH: z.string().default("ffmpeg"),
+  FFPROBE_PATH: z.string().default("ffprobe"),
 });
 
 function loadConfig() {

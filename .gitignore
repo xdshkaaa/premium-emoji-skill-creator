@@ -3,3 +3,7 @@ data/
 .env
 *.log
 dist/
+.agents/
+.claude/
+.commandcode/
+skills-lock.json

@@ -2,9 +2,12 @@ import type { Bot } from "grammy";
 import type { MyContext } from "../context.js";
 import { extractAddEmojiSetName } from "../../telegram/extract.js";
 import { resolveEmojiSet } from "../../telegram/stickers.js";
-import { processPack, retryPublish, type PackPayload } from "../flow/buildSkill.js";
+import { retryPublish } from "../flow/buildSkill.js";
 import { requestCancel, isRunning } from "../flow/cancellation.js";
+import { stagePack } from "../flow/recolorStore.js";
+import { handlePendingHexMessage } from "./recolor.js";
 import { upsertUser } from "../../db/repo.js";
+import { packChoiceKeyboard } from "../keyboards.js";
 import { E } from "../emoji.js";
 
 const HTML = { parse_mode: "HTML" as const };
@@ -36,6 +39,8 @@ export function registerPackInputHandlers(bot: Bot<MyContext>): void {
 
     upsertUser(ctx.from.id, ctx.from.username ?? null);
 
+    if (await handlePendingHexMessage(ctx)) return;
+
     const setName = extractAddEmojiSetName(ctx.message.text);
     if (setName) {
       const resolved = await resolveEmojiSet(bot, setName);
@@ -50,12 +55,16 @@ export function registerPackInputHandlers(bot: Bot<MyContext>): void {
         }
         return;
       }
-      const payload: PackPayload = {
+      const token = stagePack({
+        userId: ctx.from.id,
         setName: resolved.setName,
         packTitle: resolved.title,
         stickers: resolved.stickers,
-      };
-      await processPack(ctx, payload);
+      });
+      await ctx.reply(
+        `${E.box} Пак «<b>${resolved.title}</b>» — ${resolved.stickers.length} эмодзи. Что делаем?`,
+        { ...HTML, reply_markup: packChoiceKeyboard(token) },
+      );
       return;
     }
 

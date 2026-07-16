@@ -43,6 +43,20 @@ const MIGRATIONS: string[] = [
     UNIQUE (skill_id, custom_emoji_id)
   );
   `,
+  // v2: recolored packs
+  `
+  CREATE TABLE recolored_packs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_user_id INTEGER NOT NULL,
+    source_set_name TEXT NOT NULL,
+    new_set_name TEXT,
+    color_hex TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('manual','ai')),
+    status TEXT NOT NULL CHECK (status IN ('pending','done','failed')) DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX idx_recolored_user ON recolored_packs(tg_user_id);
+  `,
 ];
 
 export function runMigrations(db: DatabaseSync): void {

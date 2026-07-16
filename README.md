@@ -23,6 +23,10 @@ GITHUB_SKILLS_REPO=owner/repo
 DB_PATH=data/bot.sqlite
 ```
 
+5. (Optional, for AI color picking on recolor) set `AI_API_KEY` — the button is hidden
+   without it. Recolor also needs `ffmpeg`/`ffprobe` on `$PATH` for video (webm) emoji;
+   without them video emoji are skipped and reported, static/animated still work.
+
 ## Run locally
 
 ```
@@ -79,6 +83,9 @@ Long polling — no inbound ports, no nginx needed.
 
 - Storage: SQLite via Node's built-in `node:sqlite` (Node 22.5+), no native compile step —
   this is why `better-sqlite3` isn't used (its prebuilt binaries lag behind newest Node ABIs).
+- Recolor uses `sharp` (native dependency, prebuilt binary installed via npm) for static
+  webp/png emoji, a pure JS Lottie-JSON walker for `.tgs`, and shells out to `ffmpeg`/`ffprobe`
+  for `.webm` video emoji.
 - Generated skill files are fully re-rendered from the database on every publish
   (never hand-patched), so merging a second pack into an existing skill is deterministic.
 - The bot discloses, once per user before the first publish, that the pack name and
