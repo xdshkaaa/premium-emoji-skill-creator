@@ -11,8 +11,6 @@ export function mainMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("📦 Мои скиллы", "menu:skills")
     .row()
-    .text("⚙️ Опубликовать все неопубликованные", "menu:publish")
-    .row()
     .text("👀 Как это работает", "menu:help");
 }
 

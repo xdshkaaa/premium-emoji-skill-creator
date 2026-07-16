@@ -2,7 +2,6 @@ import type { Bot } from "grammy";
 import type { MyContext } from "../context.js";
 import { upsertUser, getSkillsForUser } from "../../db/repo.js";
 import { config } from "../../config.js";
-import { retryPublish } from "../flow/buildSkill.js";
 import { E } from "../emoji.js";
 import { mainMenuKeyboard, backToMenuKeyboard } from "../keyboards.js";
 
@@ -59,27 +58,6 @@ async function showSkills(ctx: MyContext, userId: number): Promise<void> {
   else await ctx.reply(text, opts);
 }
 
-async function publishPending(ctx: MyContext, userId: number): Promise<void> {
-  const pending = getSkillsForUser(userId).filter((s) => !s.published_sha);
-  if (pending.length === 0) {
-    const text = `${E.check} Публиковать нечего: всё уже опубликовано.`;
-    const opts = { ...HTML, reply_markup: backToMenuKeyboard() };
-    if (ctx.callbackQuery) await ctx.editMessageText(text, opts);
-    else await ctx.reply(text, opts);
-    return;
-  }
-  let succeeded = 0;
-  for (const skill of pending) {
-    if (await retryPublish(skill.id, ctx)) succeeded++;
-  }
-  const failed = pending.length - succeeded;
-  const summary =
-    failed === 0
-      ? `${E.check} Опубликовано: <b>${succeeded}</b> из ${pending.length}.`
-      : `${E.warn} Опубликовано: <b>${succeeded}</b> из ${pending.length}. Не удалось: ${failed}. Нажми «Повторить публикацию» на карточке скилла выше.`;
-  await ctx.reply(summary, { ...HTML, reply_markup: backToMenuKeyboard() });
-}
-
 export function registerStartHandlers(bot: Bot<MyContext>): void {
   bot.command(["start", "menu", "help"], async (ctx) => {
     if (ctx.from) upsertUser(ctx.from.id, ctx.from.username ?? null);
@@ -95,12 +73,6 @@ export function registerStartHandlers(bot: Bot<MyContext>): void {
     await ctx.answerCallbackQuery();
     if (!ctx.from) return;
     await showSkills(ctx, ctx.from.id);
-  });
-
-  bot.callbackQuery("menu:publish", async (ctx) => {
-    await ctx.answerCallbackQuery();
-    if (!ctx.from) return;
-    await publishPending(ctx, ctx.from.id);
   });
 
   bot.callbackQuery("menu:help", async (ctx) => {
