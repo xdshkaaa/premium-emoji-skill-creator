@@ -16,6 +16,7 @@ import { stickerFormat } from "../../telegram/stickers.js";
 import { buildUniqueSlug } from "../../skill/slug.js";
 import { renderSkillMd } from "../../skill/template.js";
 import { renderCatalog } from "../../skill/catalog.js";
+import { renderLangModules } from "../../skill/langModules.js";
 import { publishFiles } from "../../publish/github.js";
 import { retryPublishKeyboard, backToMenuKeyboard } from "../keyboards.js";
 import { config } from "../../config.js";
@@ -83,7 +84,7 @@ async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Pr
     skillTitle = existing.title;
   } else {
     skillTitle = payload.packTitle;
-    const slug = buildUniqueSlug(userId, skillTitle);
+    const slug = buildUniqueSlug(skillTitle);
     const githubPath = `skills/${slug}`;
     skillId = createSkill({
       tgUserId: userId,
@@ -101,8 +102,9 @@ async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Pr
   const newStickers = payload.stickers.filter((s) => s.custom_emoji_id && !existingIds.has(s.custom_emoji_id));
 
   if (newStickers.length === 0) {
+    const githubPath = getSkillById(skillId)!.github_path;
     await ctx.reply(
-      `${E.eyes} Все ${payload.stickers.length} эмодзи уже есть в скилле «<b>${skillTitle}</b>». Добавлять нечего.`,
+      `${E.eyes} Все ${payload.stickers.length} эмодзи уже есть в скилле «<b>${skillTitle}</b>». Добавлять нечего.\n\nУстановка:\n<code>npx skills add ${installUrl(githubPath)}</code>`,
       { ...HTML, reply_markup: backToMenuKeyboard() },
     );
     return;
@@ -132,6 +134,10 @@ async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Pr
       [
         { path: `${skillRow.github_path}/SKILL.md`, content: skillMd },
         { path: `${skillRow.github_path}/references/emoji-catalog.md`, content: catalogMd },
+        ...renderLangModules(skillRow, allEmojis).map((f) => ({
+          path: `${skillRow.github_path}/${f.path}`,
+          content: f.content,
+        })),
       ],
       isNewSkill
         ? `Add skill ${skillRow.slug} (${allEmojis.length} emoji)`
@@ -174,6 +180,10 @@ export async function retryPublish(skillId: number, ctx: MyContext): Promise<boo
       [
         { path: `${skillRow.github_path}/SKILL.md`, content: skillMd },
         { path: `${skillRow.github_path}/references/emoji-catalog.md`, content: catalogMd },
+        ...renderLangModules(skillRow, allEmojis).map((f) => ({
+          path: `${skillRow.github_path}/${f.path}`,
+          content: f.content,
+        })),
       ],
       `Retry publish ${skillRow.slug}`,
     );

@@ -7,6 +7,7 @@ const envSchema = z.object({
     .string()
     .regex(/^[^/\s]+\/[^/\s]+$/, "GITHUB_SKILLS_REPO must be owner/repo"),
   DB_PATH: z.string().default("data/bot.sqlite"),
+  ADMIN_TG_ID: z.coerce.number().int().positive().optional(),
 });
 
 function loadConfig() {

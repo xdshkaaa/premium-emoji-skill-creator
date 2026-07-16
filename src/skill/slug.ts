@@ -10,9 +10,8 @@ export function slugify(input: string): string {
     .slice(0, 50);
 }
 
-export function buildUniqueSlug(tgUserId: number, base: string): string {
-  const packSlug = slugify(base) || "pack";
-  const root = `${tgUserId}-${packSlug}`.slice(0, 60);
+export function buildUniqueSlug(base: string): string {
+  const root = (slugify(base) || "pack").slice(0, 60);
   if (!slugExists(root)) return root;
   for (let n = 2; n < 100; n++) {
     const candidate = `${root}-${n}`;
