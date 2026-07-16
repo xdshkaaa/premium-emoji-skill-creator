@@ -76,6 +76,19 @@ export function findSkillByUserAndSetName(
     .get(tgUserId, setName) as SkillRow | undefined;
 }
 
+/** Finds ANY published skill built from this pack name, regardless of owner — reused instead of
+ *  building a duplicate when a second user sends the same public pack. */
+export function findAnySkillBySetName(setName: string): SkillRow | undefined {
+  return db
+    .prepare(
+      `SELECT s.* FROM skills s
+       JOIN packs p ON p.skill_id = s.id
+       WHERE p.set_name = ? AND s.published_sha IS NOT NULL
+       ORDER BY s.created_at ASC LIMIT 1`,
+    )
+    .get(setName) as SkillRow | undefined;
+}
+
 export function createSkill(params: {
   tgUserId: number;
   slug: string;

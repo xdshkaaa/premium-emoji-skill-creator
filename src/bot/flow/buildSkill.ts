@@ -2,6 +2,7 @@ import type { MyContext } from "../context.js";
 import type { Sticker } from "grammy/types";
 import {
   findSkillByUserAndSetName,
+  findAnySkillBySetName,
   createSkill,
   getSkillById,
   createPack,
@@ -53,6 +54,16 @@ export async function processPack(ctx: MyContext, payload: PackPayload): Promise
 }
 
 async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Promise<void> {
+  // Same pack already published by someone else → hand back that skill, build nothing new.
+  const ownedByAnother = payload.setName ? findAnySkillBySetName(payload.setName) : undefined;
+  if (ownedByAnother && ownedByAnother.tg_user_id !== userId) {
+    await ctx.reply(
+      `${E.check} Этот пак уже есть — скилл «${ownedByAnother.title}» опубликован.\n\nУстановка:\n<code>npx skills add ${installUrl(ownedByAnother.github_path)}</code>`,
+      { ...HTML, reply_markup: backToMenuKeyboard() },
+    );
+    return;
+  }
+
   // Auto target: same source pack seen before for this user → merge into that skill. Else new skill.
   const existing = payload.setName
     ? findSkillByUserAndSetName(userId, payload.setName)
