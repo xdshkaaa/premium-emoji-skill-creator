@@ -6,8 +6,8 @@ import type { InputSticker } from "@grammyjs/types";
 const MAX_SET_NAME_LEN = 64;
 const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
-const THROTTLE_MS = 400;
-const CONCURRENCY = 3;
+const THROTTLE_MS = 700;
+const CONCURRENCY = 1;
 const API_TIMEOUT_MS = 25_000;
 
 function sleep(ms: number): Promise<void> {
@@ -114,15 +114,13 @@ export async function createRecoloredPack(
   const title = buildPackTitle(params.sourceTitle, params.hex, botUsername);
 
   const uploadedFileIds: string[] = [];
-  for (const batch of chunk(items, CONCURRENCY)) {
+  for (const item of items) {
     params.checkCancel?.();
-    const uploaded = await Promise.all(
-      batch.map((item) => {
-        params.checkCancel?.();
-        return uploadWithRetry(bot, params.userId, item);
-      }),
-    );
-    uploadedFileIds.push(...uploaded.map((u) => u.file_id));
+    const t0 = Date.now();
+    const uploaded = await uploadWithRetry(bot, params.userId, item);
+    const ms = Date.now() - t0;
+    console.log(`[upload] ${item.emoji} ${item.input?.constructor?.name ?? ""} took ${ms}ms -> ${uploaded.file_id.slice(0, 12)}`);
+    uploadedFileIds.push(uploaded.file_id);
     await params.onUploadProgress?.(uploadedFileIds.length, items.length);
     await sleep(THROTTLE_MS);
   }
