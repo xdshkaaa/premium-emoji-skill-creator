@@ -7,7 +7,7 @@ const MAX_SET_NAME_LEN = 64;
 const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
 const THROTTLE_MS = 400;
-const CONCURRENCY = 6;
+const CONCURRENCY = 3;
 const API_TIMEOUT_MS = 25_000;
 
 function sleep(ms: number): Promise<void> {
@@ -117,7 +117,10 @@ export async function createRecoloredPack(
   for (const batch of chunk(items, CONCURRENCY)) {
     params.checkCancel?.();
     const uploaded = await Promise.all(
-      batch.map((item) => uploadWithRetry(bot, params.userId, item)),
+      batch.map((item) => {
+        params.checkCancel?.();
+        return uploadWithRetry(bot, params.userId, item);
+      }),
     );
     uploadedFileIds.push(...uploaded.map((u) => u.file_id));
     await params.onUploadProgress?.(uploadedFileIds.length, items.length);
@@ -191,6 +194,7 @@ export async function createRecoloredPack(
     const results = await Promise.all(
       batch.map(async (item) => {
         const idx = items.indexOf(item);
+        params.checkCancel?.();
         try {
           await addWithRetry(bot, params.userId, setName, uploadedFileIds[idx]!, item);
           return true;
