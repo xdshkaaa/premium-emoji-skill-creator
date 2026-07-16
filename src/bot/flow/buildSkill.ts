@@ -32,6 +32,10 @@ function installUrl(githubPath: string): string {
   return `https://github.com/${config.githubOwner}/${config.githubRepo}/tree/main/${githubPath}`;
 }
 
+function installBlock(githubPath: string): string {
+  return `<blockquote><b>Установка:</b>\n<code>npx skills add ${installUrl(githubPath)}</code></blockquote>`;
+}
+
 const HTML = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
 
 export async function processPack(ctx: MyContext, payload: PackPayload): Promise<void> {
@@ -58,7 +62,7 @@ async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Pr
   const ownedByAnother = payload.setName ? findAnySkillBySetName(payload.setName) : undefined;
   if (ownedByAnother && ownedByAnother.tg_user_id !== userId) {
     await ctx.reply(
-      `${E.check} Этот пак уже есть — скилл «${ownedByAnother.title}» опубликован.\n\nУстановка:\n<code>npx skills add ${installUrl(ownedByAnother.github_path)}</code>`,
+      `${E.check} Этот пак уже есть: скилл «<b>${ownedByAnother.title}</b>» опубликован.\n\n${installBlock(ownedByAnother.github_path)}`,
       { ...HTML, reply_markup: backToMenuKeyboard() },
     );
     return;
@@ -98,13 +102,13 @@ async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Pr
 
   if (newStickers.length === 0) {
     await ctx.reply(
-      `${E.eyes} Все ${payload.stickers.length} эмодзи уже есть в скилле «${skillTitle}». Добавлять нечего.`,
+      `${E.eyes} Все ${payload.stickers.length} эмодзи уже есть в скилле «<b>${skillTitle}</b>». Добавлять нечего.`,
       { ...HTML, reply_markup: backToMenuKeyboard() },
     );
     return;
   }
 
-  const progressMsg = await ctx.reply(`${E.box} Собираю скилл из ${newStickers.length} эмодзи…`, HTML);
+  const progressMsg = await ctx.reply(`${E.box} Собираю скилл из <b>${newStickers.length}</b> эмодзи…`, HTML);
 
   const packId = createPack({ skillId, setName: payload.setName, title: payload.packTitle });
 
@@ -141,7 +145,7 @@ async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Pr
     await ctx.api.editMessageText(
       progressMsg.chat.id,
       progressMsg.message_id,
-      `${E.check} Скилл «${skillRow.title}» опубликован — всего ${allEmojis.length} эмодзи (+${newStickers.length} новых).${skippedLine}\n\nУстановка:\n<code>npx skills add ${installUrl(skillRow.github_path)}</code>`,
+      `${E.check} Скилл «<b>${skillRow.title}</b>» опубликован: всего ${allEmojis.length} эмодзи (+${newStickers.length} новых).${skippedLine}\n\n${installBlock(skillRow.github_path)}`,
       { ...HTML, reply_markup: backToMenuKeyboard() },
     );
   } catch (err) {
@@ -149,7 +153,7 @@ async function runPack(ctx: MyContext, userId: number, payload: PackPayload): Pr
     await ctx.api.editMessageText(
       progressMsg.chat.id,
       progressMsg.message_id,
-      `${E.warn} Не удалось опубликовать в GitHub. Эмодзи сохранены — нажми, чтобы повторить.`,
+      `${E.warn} Не удалось опубликовать в GitHub. Эмодзи сохранены: нажми, чтобы повторить.`,
       { ...HTML, reply_markup: retryPublishKeyboard(skillId) },
     );
   }
@@ -176,7 +180,7 @@ export async function retryPublish(skillId: number, ctx: MyContext): Promise<boo
     setSkillPublishedSha(skillId, sha);
     touchSkill(skillId);
     await ctx.reply(
-      `${E.check} Скилл «${skillRow.title}» опубликован.\n\nУстановка:\n<code>npx skills add ${installUrl(skillRow.github_path)}</code>`,
+      `${E.check} Скилл «<b>${skillRow.title}</b>» опубликован.\n\n${installBlock(skillRow.github_path)}`,
       { ...HTML, reply_markup: backToMenuKeyboard() },
     );
     return true;

@@ -41,10 +41,10 @@ export function registerPackInputHandlers(bot: Bot<MyContext>): void {
       const resolved = await resolveEmojiSet(bot, setName);
       if (!resolved.ok) {
         if (resolved.reason === "not_found") {
-          await ctx.reply(`${E.warn} Ссылка не ведёт на реальный пак эмодзи. Проверь и пришли ещё раз.`, HTML);
+          await ctx.reply(`${E.warn} <b>Ссылка не ведёт на реальный пак эмодзи.</b> Проверь и пришли ещё раз.`, HTML);
         } else {
           await ctx.reply(
-            `${E.warn} Это обычный стикерпак, а не пак ПРЕМИУМ-эмодзи. Нужна ссылка вида https://t.me/addemoji/...`,
+            `${E.warn} Это обычный стикерпак, а не пак <b>ПРЕМИУМ-эмодзи</b>. Нужна ссылка вида https://t.me/addemoji/...`,
             HTML,
           );
         }
@@ -60,7 +60,7 @@ export function registerPackInputHandlers(bot: Bot<MyContext>): void {
     }
 
     await ctx.reply(
-      `${E.eyes} Принимаю только ссылки на пак вида https://t.me/addemoji/ИмяПака. Одиночные эмодзи не подходят — пришли ссылку на весь пак.`,
+      `${E.eyes} Принимаю только ссылки на пак вида https://t.me/addemoji/ИмяПака. Одиночные эмодзи не подходят: пришли ссылку на весь пак.`,
       HTML,
     );
   });

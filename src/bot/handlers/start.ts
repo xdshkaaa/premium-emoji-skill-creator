@@ -9,21 +9,21 @@ import { mainMenuKeyboard, backToMenuKeyboard } from "../keyboards.js";
 const HTML = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
 
 function menuText(): string {
-  return `${E.wave} Пришли ссылку на пак премиум-эмодзи вида https://t.me/addemoji/ИмяПака — и я соберу из него скилл для Claude Code.
+  return `${E.wave} <b>Пришли ссылку на пак премиум-эмодзи</b> вида https://t.me/addemoji/ИмяПака. Соберу из него скилл для Claude Code.
 
-Одиночные эмодзи не принимаю, только ссылка на весь пак.
+<blockquote>Одиночные эмодзи не принимаю: нужна ссылка на весь пак.</blockquote>
 
-Остальное — через кнопки ниже.`;
+Остальное: через кнопки ниже.`;
 }
 
 function helpText(): string {
-  return `${E.eyes} Как это работает:
+  return `${E.eyes} <b>Как это работает</b>
 
-1. Присылаешь ссылку на пак эмодзи — https://t.me/addemoji/ИмяПака
+1. Присылаешь ссылку на пак эмодзи: https://t.me/addemoji/ИмяПака
 2. Публикую скилл в GitHub и присылаю команду установки
 
-Пришлёшь пак ещё раз позже — новые эмодзи домёржатся в тот же скилл, дубли пропустятся.
-Если пак уже публиковал кто-то другой — отдам готовый скилл, новый не создаю.`;
+<blockquote>Пришлёшь пак ещё раз позже: новые эмодзи домёржатся в тот же скилл, дубли пропустятся.
+Если пак уже публиковал кто-то другой: отдам готовый скилл, новый не создаю.</blockquote>`;
 }
 
 async function showMenu(ctx: MyContext, edit: boolean): Promise<void> {
@@ -49,11 +49,11 @@ async function showSkills(ctx: MyContext, userId: number): Promise<void> {
   const shown = skills.slice(0, MAX_LISTED);
   const lines = shown.map((s) => {
     const installUrl = `https://github.com/${config.githubOwner}/${config.githubRepo}/tree/main/${s.github_path}`;
-    const status = s.published_sha ? "" : " (публикация не завершена)";
-    return `${E.check} ${s.title}${status}\n<code>npx skills add ${installUrl}</code>`;
+    const status = s.published_sha ? "" : " <i>(публикация не завершена)</i>";
+    return `${E.check} <b>${s.title}</b>${status}\n<code>npx skills add ${installUrl}</code>`;
   });
   const overflow = skills.length - shown.length;
-  const overflowLine = overflow > 0 ? `\n\n…и ещё ${overflow}. Полный список — в GitHub-репозитории скиллов.` : "";
+  const overflowLine = overflow > 0 ? `\n\n<blockquote>…и ещё ${overflow}. Полный список смотри в GitHub-репозитории скиллов.</blockquote>` : "";
   const text = lines.join("\n\n") + overflowLine;
   if (ctx.callbackQuery) await ctx.editMessageText(text, opts);
   else await ctx.reply(text, opts);
@@ -62,7 +62,7 @@ async function showSkills(ctx: MyContext, userId: number): Promise<void> {
 async function publishPending(ctx: MyContext, userId: number): Promise<void> {
   const pending = getSkillsForUser(userId).filter((s) => !s.published_sha);
   if (pending.length === 0) {
-    const text = `${E.check} Публиковать нечего — всё уже опубликовано.`;
+    const text = `${E.check} Публиковать нечего: всё уже опубликовано.`;
     const opts = { ...HTML, reply_markup: backToMenuKeyboard() };
     if (ctx.callbackQuery) await ctx.editMessageText(text, opts);
     else await ctx.reply(text, opts);
@@ -75,8 +75,8 @@ async function publishPending(ctx: MyContext, userId: number): Promise<void> {
   const failed = pending.length - succeeded;
   const summary =
     failed === 0
-      ? `${E.check} Опубликовано: ${succeeded} из ${pending.length}.`
-      : `${E.warn} Опубликовано: ${succeeded} из ${pending.length}. Не удалось: ${failed} — нажми «Повторить публикацию» на карточке скилла выше.`;
+      ? `${E.check} Опубликовано: <b>${succeeded}</b> из ${pending.length}.`
+      : `${E.warn} Опубликовано: <b>${succeeded}</b> из ${pending.length}. Не удалось: ${failed}. Нажми «Повторить публикацию» на карточке скилла выше.`;
   await ctx.reply(summary, { ...HTML, reply_markup: backToMenuKeyboard() });
 }
 
