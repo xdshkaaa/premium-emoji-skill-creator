@@ -165,12 +165,13 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
 
     finishRecoloredPack(rowId, result.setName);
 
+    const skippedTotal = failed.length + result.skipped;
     const skippedLine =
-      failed.length > 0 ? `\n\nПропущено ${failed.length} из-за ошибок конвертации.` : "";
+      skippedTotal > 0 ? `\n\nПропущено ${skippedTotal} из-за ошибок.` : "";
     await ctx.api.editMessageText(
       progressMsg.chat.id,
       progressMsg.message_id,
-      `${E.check} Готово! <a href="https://t.me/addemoji/${result.setName}">Новый пак</a> создан из ${items.length} эмодзи.${skippedLine}`,
+      `${E.check} Готово! <a href="https://t.me/addemoji/${result.setName}">Новый пак</a> создан из ${items.length - result.skipped} эмодзи.${skippedLine}`,
       { ...HTML, reply_markup: recolorDoneKeyboard(rowId) },
     );
   } catch (err) {

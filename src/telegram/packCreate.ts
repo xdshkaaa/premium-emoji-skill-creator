@@ -6,11 +6,18 @@ import type { InputSticker } from "@grammyjs/types";
 const MAX_SET_NAME_LEN = 64;
 const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
-const THROTTLE_MS = 1100;
+const THROTTLE_MS = 400;
+const CONCURRENCY = 6;
 const API_TIMEOUT_MS = 25_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
 class ApiTimeoutError extends Error {
@@ -98,7 +105,7 @@ function toInputSticker(fileId: string, item: RecolorItem): InputSticker<InputFi
 export async function createRecoloredPack(
   bot: Bot<MyContext>,
   params: CreateRecoloredPackParams,
-): Promise<{ setName: string; title: string }> {
+): Promise<{ setName: string; title: string; skipped: number }> {
   const me = await withTimeout(bot.api.getMe(), "getMe");
   const botUsername = me.username;
   const items = params.items.slice(0, SET_CAP);
@@ -107,10 +114,12 @@ export async function createRecoloredPack(
   const title = buildPackTitle(params.sourceTitle, params.hex, botUsername);
 
   const uploadedFileIds: string[] = [];
-  for (const item of items) {
+  for (const batch of chunk(items, CONCURRENCY)) {
     params.checkCancel?.();
-    const uploaded = await uploadWithRetry(bot, params.userId, item);
-    uploadedFileIds.push(uploaded.file_id);
+    const uploaded = await Promise.all(
+      batch.map((item) => uploadWithRetry(bot, params.userId, item)),
+    );
+    uploadedFileIds.push(...uploaded.map((u) => u.file_id));
     await params.onUploadProgress?.(uploadedFileIds.length, items.length);
     await sleep(THROTTLE_MS);
   }
@@ -176,15 +185,28 @@ export async function createRecoloredPack(
   await params.onProgress?.(1, items.length);
   await sleep(THROTTLE_MS);
 
-  for (let i = 1; i < items.length; i++) {
+  let skipped = 0;
+  for (const batch of chunk(items.slice(1), CONCURRENCY)) {
     params.checkCancel?.();
-    const item = items[i]!;
-    await addWithRetry(bot, params.userId, setName, uploadedFileIds[i]!, item);
-    await params.onProgress?.(i + 1, items.length);
+    const results = await Promise.all(
+      batch.map(async (item) => {
+        const idx = items.indexOf(item);
+        try {
+          await addWithRetry(bot, params.userId, setName, uploadedFileIds[idx]!, item);
+          return true;
+        } catch (err) {
+          console.error(`addStickerToSet failed for ${item.emoji}:`, err);
+          return false;
+        }
+      }),
+    );
+    for (const ok of results) if (!ok) skipped++;
+    const done = items.length - skipped;
+    await params.onProgress?.(Math.min(done, items.length), items.length);
     await sleep(THROTTLE_MS);
   }
 
-  return { setName, title };
+  return { setName, title, skipped };
 }
 
 async function uploadWithRetry(
