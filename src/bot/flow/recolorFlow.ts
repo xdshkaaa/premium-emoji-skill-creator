@@ -4,18 +4,24 @@ import type { MyContext } from "../context.js";
 import type { StagedColorChoice } from "./recolorStore.js";
 import { isRunning, startRun, endRun, throwIfCancelled, CancelledError } from "./cancellation.js";
 import { stickerFormat } from "../../telegram/stickers.js";
-import { downloadTgFile } from "../../media/download.js";
+import { downloadTgFileCached } from "../../media/download.js";
 import { recolorSticker, MediaError } from "../../media/recolor.js";
-import { hexToHsl } from "../../media/color.js";
+import { hexToHsl, type TintSpec } from "../../media/color.js";
+import { getGradientPreset } from "../../media/gradients.js";
 import { createRecoloredPack, type RecolorItem } from "../../telegram/packCreate.js";
 import { createRecoloredPackRow, finishRecoloredPack, failRecoloredPack } from "../../db/recolorRepo.js";
 import { backToMenuKeyboard, recolorDoneKeyboard } from "../keyboards.js";
 import { E } from "../emoji.js";
+import { mapLimit } from "../../utils/concurrency.js";
 
 const HTML = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
 const EDIT_EVERY_N = 5;
 const EDIT_EVERY_MS = 3000;
-const PHASE2_TIMEOUT_MS = 5 * 60_000;
+// Base covers up to two full flood-gate waits (~6 min each) on top of the work.
+const PHASE2_BASE_TIMEOUT_MS = 15 * 60_000;
+const PHASE2_PER_ITEM_MS = 5_000;
+const DOWNLOAD_CONCURRENCY = 8;
+const RECOLOR_CONCURRENCY = 4;
 
 function cancelKeyboardHtml(userId: number) {
   return {
@@ -48,17 +54,23 @@ export async function runRecolorJob(
 
 async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoice): Promise<void> {
   const userId = staged.userId;
-  const hsl = hexToHsl(staged.hex);
+  const gradient = staged.mode === "gradient" && staged.gradientId
+    ? getGradientPreset(staged.gradientId)
+    : undefined;
+  const spec: TintSpec = gradient
+    ? { kind: "gradient", stops: gradient.colors.map(hexToHsl) }
+    : { kind: "solid", hsl: hexToHsl(staged.hex) };
+  const colorLabel = gradient ? gradient.label : `<code>${staged.hex}</code>`;
 
   const rowId = createRecoloredPackRow({
     tgUserId: userId,
     sourceSetName: staged.setName ?? staged.packTitle,
-    colorHex: staged.hex,
+    colorHex: gradient ? `grad:${gradient.id}` : staged.hex,
     mode: staged.mode,
   });
 
   const progressMsg = await ctx.reply(
-    `${E.box} Перекрашиваю <b>${staged.stickers.length}</b> эмодзи в <code>${staged.hex}</code>…`,
+    `${E.box} Перекрашиваю <b>${staged.stickers.length}</b> эмодзи в ${colorLabel}…`,
     cancelKeyboardHtml(userId),
   );
 
@@ -85,32 +97,66 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
     }
   }
 
-  // Phase 1: download + recolor
+  // Phase 1: batch download the whole pack, then batch recolor the whole pack
   const items: RecolorItem[] = [];
   const failed: { emoji: string; reason: string }[] = [];
+  const total = staged.stickers.length;
 
   try {
-    for (let i = 0; i < staged.stickers.length; i++) {
+    // Stage 1: download all
+    lastEditCount = 0;
+    let downloadedCount = 0;
+    type Downloaded =
+      | { ok: true; sticker: (typeof staged.stickers)[number]; format: ReturnType<typeof stickerFormat>; buf: Buffer }
+      | { ok: false; sticker: (typeof staged.stickers)[number]; reason: string };
+    const downloads = await mapLimit(staged.stickers, DOWNLOAD_CONCURRENCY, async (sticker): Promise<Downloaded> => {
       throwIfCancelled(userId);
-      const sticker = staged.stickers[i]!;
       try {
         const format = stickerFormat(sticker);
-        const buf = await downloadTgFile(bot, sticker.file_id);
-        const recolored = await recolorSticker(buf, format, hsl);
-        const filename = format === "static" ? "e.webp" : format === "animated" ? "e.tgs" : "e.webm";
-        items.push({
+        const buf = await downloadTgFileCached(bot, sticker.file_id, sticker.file_unique_id);
+        downloadedCount++;
+        await maybeEditProgress(downloadedCount, total, "Скачано");
+        return { ok: true, sticker, format, buf };
+      } catch (err) {
+        if (err instanceof CancelledError) throw err;
+        console.error(`Download failed for emoji ${sticker.custom_emoji_id ?? sticker.file_id}:`, err);
+        downloadedCount++;
+        await maybeEditProgress(downloadedCount, total, "Скачано");
+        return { ok: false, sticker, reason: "error" };
+      }
+    });
+
+    // Stage 2: recolor all
+    lastEditCount = 0;
+    let recoloredCount = 0;
+    const recolorResults = await mapLimit(downloads, RECOLOR_CONCURRENCY, async (dl): Promise<RecolorItem | null> => {
+      throwIfCancelled(userId);
+      if (!dl.ok) {
+        failed.push({ emoji: dl.sticker.emoji ?? "❓", reason: dl.reason });
+        recoloredCount++;
+        await maybeEditProgress(recoloredCount, total, "Перекрашено");
+        return null;
+      }
+      try {
+        const recolored = await recolorSticker(dl.buf, dl.format, spec);
+        const filename = dl.format === "static" ? "e.webp" : dl.format === "animated" ? "e.tgs" : "e.webm";
+        return {
           input: new InputFile(recolored, filename),
-          emoji: sticker.emoji ?? "❓",
-          format,
-        });
+          emoji: dl.sticker.emoji ?? "❓",
+          format: dl.format,
+        };
       } catch (err) {
         if (err instanceof CancelledError) throw err;
         const reason = err instanceof MediaError ? err.code : "error";
-        failed.push({ emoji: sticker.emoji ?? "❓", reason });
-        console.error(`Recolor failed for emoji ${sticker.custom_emoji_id ?? sticker.file_id}:`, err);
+        failed.push({ emoji: dl.sticker.emoji ?? "❓", reason });
+        console.error(`Recolor failed for emoji ${dl.sticker.custom_emoji_id ?? dl.sticker.file_id}:`, err);
+        return null;
+      } finally {
+        recoloredCount++;
+        await maybeEditProgress(recoloredCount, total, "Перекрашено");
       }
-      await maybeEditProgress(i + 1, staged.stickers.length, "Перекрашено");
-    }
+    });
+    for (const item of recolorResults) if (item) items.push(item);
   } catch (err) {
     if (err instanceof CancelledError) {
       failRecoloredPack(rowId);
@@ -138,26 +184,40 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
 
   // Phase 2: create the new pack
   let createdSetName: string | undefined;
-  await maybeEditProgress(0, staged.stickers.length, "Загружаю в Telegram");
+  lastEditCount = 0;
+  await maybeEditProgress(0, items.length, "Загружаю в пак");
   try {
     const createPromise = createRecoloredPack(bot, {
       userId,
       sourceSetName: staged.setName ?? staged.packTitle,
       sourceTitle: staged.packTitle,
-      hex: staged.hex,
+      hex: gradient ? gradient.id : staged.hex,
+      colorLabel: gradient?.label,
       items,
       onSetCreated: (setName) => {
         createdSetName = setName;
       },
-      onUploadProgress: (done, total) => maybeEditProgress(done, total, "Загружаю в Telegram"),
-      onProgress: (done, total) => maybeEditProgress(done, total, "Добавляю в пак"),
+      onProgress: (done, total) => maybeEditProgress(done, total, "Загружаю в пак"),
       checkCancel: () => throwIfCancelled(userId),
+      onFloodWait: (secondsLeft) => {
+        const now = Date.now();
+        if (now - lastEditAt < EDIT_EVERY_MS) return;
+        lastEditAt = now;
+        ctx.api
+          .editMessageText(
+            progressMsg.chat.id,
+            progressMsg.message_id,
+            `${E.box} Telegram просит подождать ~<b>${secondsLeft}</b> сек (флуд-лимит), жду…`,
+            cancelKeyboardHtml(userId),
+          )
+          .catch(() => {});
+      },
     });
 
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(
         () => reject(new Error("Phase 2 exceeded time budget")),
-        PHASE2_TIMEOUT_MS,
+        PHASE2_BASE_TIMEOUT_MS + items.length * PHASE2_PER_ITEM_MS,
       ),
     );
 

@@ -1,6 +1,6 @@
 import { gunzipSync, gzipSync } from "node:zlib";
-import type { Hsl } from "./color.js";
-import { tintPixel } from "./color.js";
+import type { Hsl, TintSpec } from "./color.js";
+import { gradientHslAt, tintPixel } from "./color.js";
 
 export class TgsTooLargeError extends Error {
   constructor(size: number) {
@@ -77,36 +77,76 @@ function recolorGradientProp(g: JsonValue, hsl: Hsl): void {
   }
 }
 
-function walk(node: JsonValue, hsl: Hsl): void {
+type ColorNode =
+  | { kind: "solid"; prop: JsonValue }
+  | { kind: "gradient"; prop: JsonValue };
+
+/** Collects color-carrying shape nodes in stack (traversal) order. */
+function collectColorNodes(node: JsonValue, out: ColorNode[]): void {
   if (Array.isArray(node)) {
-    for (const item of node) walk(item, hsl);
+    for (const item of node) collectColorNodes(item, out);
     return;
   }
   if (!isObject(node)) return;
 
   const ty = node["ty"];
   if ((ty === "fl" || ty === "st") && node["c"] !== undefined) {
-    recolorSolidColorProp(node["c"], hsl);
+    out.push({ kind: "solid", prop: node["c"] });
   }
   if ((ty === "gf" || ty === "gs") && node["g"] !== undefined) {
-    recolorGradientProp(node["g"], hsl);
+    out.push({ kind: "gradient", prop: node["g"] });
   }
 
   for (const value of Object.values(node)) {
-    if (value !== undefined) walk(value, hsl);
+    if (value !== undefined) collectColorNodes(value, out);
   }
 }
 
-export function recolorLottieJson(anim: JsonObject, hsl: Hsl): JsonObject {
+function tintColorNode(node: ColorNode, hsl: Hsl): void {
+  if (node.kind === "solid") recolorSolidColorProp(node.prop, hsl);
+  else recolorGradientProp(node.prop, hsl);
+}
+
+/** Each color node gets its own target from the spectrum, by stack order —
+ *  first node = first stop, last node = last stop. Solid spec = one stop. */
+export function recolorLottieJson(anim: JsonObject, spec: TintSpec): JsonObject {
   const clone = JSON.parse(JSON.stringify(anim)) as JsonObject;
-  walk(clone, hsl);
+  const nodes: ColorNode[] = [];
+  collectColorNodes(clone, nodes);
+  if (spec.kind === "solid") {
+    for (const node of nodes) tintColorNode(node, spec.hsl);
+  } else {
+    const total = nodes.length;
+    for (let i = 0; i < total; i++) {
+      const t = total > 1 ? i / (total - 1) : 0.5;
+      tintColorNode(nodes[i]!, gradientHslAt(spec.stops, t));
+    }
+  }
   return clone;
 }
 
-export async function recolorTgs(buf: Buffer, hsl: Hsl): Promise<Buffer> {
+/** Strips Lottie editor metadata (layer/shape names) to shrink oversized TGS. */
+function stripNames(node: JsonValue): void {
+  if (Array.isArray(node)) {
+    for (const item of node) stripNames(item);
+    return;
+  }
+  if (!isObject(node)) return;
+  delete node["nm"];
+  delete node["mn"];
+  for (const value of Object.values(node)) {
+    if (value !== undefined) stripNames(value);
+  }
+}
+
+export async function recolorTgs(buf: Buffer, spec: TintSpec): Promise<Buffer> {
   const json = JSON.parse(gunzipSync(buf).toString("utf8")) as JsonObject;
-  const recolored = recolorLottieJson(json, hsl);
-  const out = gzipSync(Buffer.from(JSON.stringify(recolored)), { level: 9 });
+  const recolored = recolorLottieJson(json, spec);
+  let out = gzipSync(Buffer.from(JSON.stringify(recolored)), { level: 9 });
+  if (out.byteLength > TGS_MAX_BYTES) {
+    stripNames(recolored);
+    out = gzipSync(Buffer.from(JSON.stringify(recolored)), { level: 9 });
+  }
   if (out.byteLength > TGS_MAX_BYTES) {
     throw new TgsTooLargeError(out.byteLength);
   }

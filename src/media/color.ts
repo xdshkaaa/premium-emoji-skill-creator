@@ -4,6 +4,8 @@ export interface Hsl {
   l: number; // 0..1
 }
 
+export type TintSpec = { kind: "solid"; hsl: Hsl } | { kind: "gradient"; stops: Hsl[] };
+
 export function normalizeHex(input: string): string | null {
   const trimmed = input.trim().replace(/^#/, "");
   if (!/^[0-9a-fA-F]{6}$/.test(trimmed)) return null;
@@ -105,4 +107,45 @@ export function tintRgbaInPlace(data: Uint8Array | Buffer, targetHsl: Hsl, chann
 export function hexToHsl(hex: string): Hsl {
   const { r, g, b } = hexToRgb(hex);
   return rgbToHsl(r, g, b);
+}
+
+/** Target hue/sat at position t (0..1) along the stop spectrum. Lerps in RGB
+ *  space between adjacent stops so hue never wraps the long way around. */
+export function gradientHslAt(stops: Hsl[], t: number): Hsl {
+  if (stops.length === 0) throw new Error("gradientHslAt: no stops");
+  if (stops.length === 1) return stops[0]!;
+  const clamped = Math.max(0, Math.min(1, t));
+  const scaled = clamped * (stops.length - 1);
+  const i = Math.min(Math.floor(scaled), stops.length - 2);
+  const f = scaled - i;
+  const a = hslToRgb(stops[i]!);
+  const b = hslToRgb(stops[i + 1]!);
+  return rgbToHsl(
+    a.r + (b.r - a.r) * f,
+    a.g + (b.g - a.g) * f,
+    a.b + (b.b - a.b) * f,
+  );
+}
+
+/** In-place vertical-gradient tint of an RGBA buffer: target hue/sat comes from
+ *  the row's position in the spectrum, pixel lightness is preserved. */
+export function tintRgbaGradientInPlace(
+  data: Uint8Array | Buffer,
+  stops: Hsl[],
+  width: number,
+  height: number,
+  channels: 3 | 4 = 4,
+): void {
+  for (let y = 0; y < height; y++) {
+    const target = gradientHslAt(stops, height > 1 ? y / (height - 1) : 0.5);
+    const rowStart = y * width * channels;
+    for (let x = 0; x < width; x++) {
+      const i = rowStart + x * channels;
+      if (i + channels > data.length) return;
+      const tinted = tintPixel(data[i]!, data[i + 1]!, data[i + 2]!, target);
+      data[i] = tinted.r;
+      data[i + 1] = tinted.g;
+      data[i + 2] = tinted.b;
+    }
+  }
 }

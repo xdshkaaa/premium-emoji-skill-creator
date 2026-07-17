@@ -1,6 +1,6 @@
 import { db } from "./index.js";
 
-export type RecolorMode = "manual" | "ai";
+export type RecolorMode = "manual" | "ai" | "gradient";
 export type RecolorStatus = "pending" | "done" | "failed";
 
 export interface RecoloredPackRow {

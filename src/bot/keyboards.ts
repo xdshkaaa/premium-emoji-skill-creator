@@ -1,4 +1,5 @@
 import { InlineKeyboard } from "grammy";
+import { GRADIENT_PRESETS } from "../media/gradients.js";
 
 // Custom-emoji icon IDs (Unigram - @SOUICdsgn) — set via InlineKeyboardButton.icon_custom_emoji_id,
 // not text markup, since inline keyboard button text has no parse_mode/HTML support.
@@ -68,11 +69,26 @@ export function colorMenuKeyboard(token: string, aiEnabled: boolean): InlineKeyb
     if (b) kb.text(b.label, `tint:${token}:${b.hex}`);
     kb.row();
   }
+  kb.text("🌈 Градиент", `tint:${token}:grad`);
+  kb.row();
   kb.text("Свой HEX", `tint:${token}:custom`).icon(ICON.eyes);
   if (aiEnabled) {
     kb.text("ИИ выберет", `tint:${token}:ai`).icon(ICON.gear);
   }
   kb.row().text("В меню", "menu:back").icon(ICON.back);
+  return kb;
+}
+
+export function gradientMenuKeyboard(token: string): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < GRADIENT_PRESETS.length; i += 2) {
+    const a = GRADIENT_PRESETS[i]!;
+    const b = GRADIENT_PRESETS[i + 1];
+    kb.text(a.label, `tint:${token}:g:${a.id}`);
+    if (b) kb.text(b.label, `tint:${token}:g:${b.id}`);
+    kb.row();
+  }
+  kb.text("Назад", `pk:tint:${token}`).icon(ICON.back);
   return kb;
 }
 

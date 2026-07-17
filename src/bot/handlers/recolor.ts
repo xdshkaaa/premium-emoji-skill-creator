@@ -9,7 +9,8 @@ import { runRecolorJob } from "../flow/recolorFlow.js";
 import { getStagedPack, stageColorChoice, getStagedColorChoice } from "../flow/recolorStore.js";
 import { setPending, takePendingHex, clearPending } from "../pendingInput.js";
 import { getRecoloredPackById } from "../../db/recolorRepo.js";
-import { colorMenuKeyboard, confirmRecolorKeyboard, backToMenuKeyboard } from "../keyboards.js";
+import { colorMenuKeyboard, gradientMenuKeyboard, confirmRecolorKeyboard, backToMenuKeyboard } from "../keyboards.js";
+import { getGradientPreset } from "../../media/gradients.js";
 import { E } from "../emoji.js";
 
 const HTML = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
@@ -48,13 +49,40 @@ export function registerRecolorHandlers(bot: Bot<MyContext>): void {
     });
   });
 
-  bot.callbackQuery(/^tint:([a-f0-9]+):(custom|ai|[0-9a-f]{6})$/, async (ctx) => {
+  bot.callbackQuery(/^tint:([a-f0-9]+):(custom|ai|grad|g:[a-z]+|[0-9a-f]{6})$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     const token = ctx.match![1]!;
     const choice = ctx.match![2]!;
     const staged = getStagedPack(token);
     if (!staged) {
       await ctx.editMessageText(expiredMessage().text, { ...HTML, reply_markup: backToMenuKeyboard() });
+      return;
+    }
+
+    if (choice === "grad") {
+      await ctx.editMessageText(`${E.eyes} Выбери градиент для пака «<b>${staged.packTitle}</b>»:`, {
+        ...HTML,
+        reply_markup: gradientMenuKeyboard(token),
+      });
+      return;
+    }
+
+    if (choice.startsWith("g:")) {
+      const preset = getGradientPreset(choice.slice(2));
+      if (!preset) {
+        await ctx.editMessageText(`${E.warn} Неизвестный градиент.`, { ...HTML, reply_markup: backToMenuKeyboard() });
+        return;
+      }
+      const choiceToken = stageColorChoice({
+        ...staged,
+        hex: preset.colors[1],
+        mode: "gradient",
+        gradientId: preset.id,
+      });
+      await ctx.editMessageText(
+        `${E.eyes} Градиент: <b>${preset.label}</b> (<code>${preset.colors.join(" → ")}</code>).\n\nПерекрасить ${staged.stickers.length} эмодзи и создать новый пак?`,
+        { ...HTML, reply_markup: confirmRecolorKeyboard(choiceToken, token) },
+      );
       return;
     }
 

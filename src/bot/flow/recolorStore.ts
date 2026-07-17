@@ -9,8 +9,11 @@ export interface StagedPack {
 }
 
 export interface StagedColorChoice extends StagedPack {
+  /** Solid tint color; for gradient mode holds the mid stop (used as fallback/label-free contexts). */
   hex: string;
-  mode: "manual" | "ai";
+  mode: "manual" | "ai" | "gradient";
+  /** Set when mode === "gradient": id from GRADIENT_PRESETS. */
+  gradientId?: string;
 }
 
 const TTL_MS = 30 * 60 * 1000;

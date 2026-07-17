@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recolorLottieJson } from "./recolorTgs.js";
+import { gzipSync, gunzipSync } from "node:zlib";
+import { recolorLottieJson, recolorTgs } from "./recolorTgs.js";
+import { gradientHslAt } from "./color.js";
 
-const hsl = { h: 0, s: 1, l: 0.5 }; // target red
+const hsl = { kind: "solid" as const, hsl: { h: 0, s: 1, l: 0.5 } }; // target red
 
 test("recolors static solid fill (0..1 scale)", () => {
   const anim = {
@@ -77,4 +79,60 @@ test("does not mutate input", () => {
   const before = JSON.stringify(anim);
   recolorLottieJson(anim, hsl);
   assert.equal(JSON.stringify(anim), before);
+});
+
+test("gradient spec: first shape gets first stop's hue, last gets last", () => {
+  // three gray fills → lightness preserved, hue from spectrum position
+  const anim = {
+    layers: [
+      { shapes: [{ ty: "fl", c: { a: 0, k: [0.5, 0.5, 0.5, 1] } }] },
+      { shapes: [{ ty: "fl", c: { a: 0, k: [0.5, 0.5, 0.5, 1] } }] },
+      { shapes: [{ ty: "fl", c: { a: 0, k: [0.5, 0.5, 0.5, 1] } }] },
+    ],
+  };
+  const spec = {
+    kind: "gradient" as const,
+    stops: [
+      { h: 0, s: 1, l: 0.5 }, // red
+      { h: 240, s: 1, l: 0.5 }, // blue
+    ],
+  };
+  const out = recolorLottieJson(anim as any, spec);
+  const layers = out["layers"] as any[];
+  const first = layers[0].shapes[0].c.k;
+  const last = layers[2].shapes[0].c.k;
+  assert.ok(first[0] > first[2], "first shape red-dominant");
+  assert.ok(last[2] > last[0], "last shape blue-dominant");
+});
+
+test("gradientHslAt: edges and midpoint", () => {
+  const stops = [
+    { h: 0, s: 1, l: 0.5 },
+    { h: 240, s: 1, l: 0.5 },
+  ];
+  assert.equal(Math.round(gradientHslAt(stops, 0).h), 0);
+  assert.equal(Math.round(gradientHslAt(stops, 1).h), 240);
+  const mid = gradientHslAt(stops, 0.5);
+  assert.ok(mid.h > 0 && mid.h < 360, "midpoint is a valid hue");
+  assert.equal(Math.round(gradientHslAt(stops, -5).h), 0, "t clamped low");
+  assert.equal(Math.round(gradientHslAt(stops, 5).h), 240, "t clamped high");
+});
+
+test("oversized tgs: strips nm/mn names and passes instead of throwing", async () => {
+  // one real fill + fat layer names that alone push gzip over 64KB
+  const noise = () => Array.from({ length: 400 }, () => Math.random().toString(36)).join("");
+  const anim = {
+    layers: Array.from({ length: 60 }, () => ({
+      nm: noise(),
+      mn: noise(),
+      shapes: [{ ty: "fl", nm: noise(), c: { a: 0, k: [0.5, 0.5, 0.5, 1] } }],
+    })),
+  };
+  const buf = gzipSync(Buffer.from(JSON.stringify(anim)));
+  const out = await recolorTgs(buf, hsl);
+  assert.ok(out.byteLength <= 64 * 1024, "rescued under 64KB");
+  const rescued = JSON.parse(gunzipSync(out).toString("utf8"));
+  assert.equal(rescued.layers[0].nm, undefined, "names stripped");
+  const k = rescued.layers[0].shapes[0].c.k;
+  assert.ok(k[0] > k[2], "still recolored to red");
 });

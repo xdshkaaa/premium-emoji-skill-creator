@@ -57,6 +57,26 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_recolored_user ON recolored_packs(tg_user_id);
   `,
+  // v3: allow 'gradient' mode (SQLite can't alter a CHECK — recreate the table)
+  `
+  ALTER TABLE recolored_packs RENAME TO recolored_packs_old;
+  CREATE TABLE recolored_packs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_user_id INTEGER NOT NULL,
+    source_set_name TEXT NOT NULL,
+    new_set_name TEXT,
+    color_hex TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('manual','ai','gradient')),
+    status TEXT NOT NULL CHECK (status IN ('pending','done','failed')) DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  INSERT INTO recolored_packs (id, tg_user_id, source_set_name, new_set_name, color_hex, mode, status, created_at)
+    SELECT id, tg_user_id, source_set_name, new_set_name, color_hex, mode, status, created_at
+    FROM recolored_packs_old;
+  DROP TABLE recolored_packs_old;
+  DROP INDEX IF EXISTS idx_recolored_user;
+  CREATE INDEX idx_recolored_user ON recolored_packs(tg_user_id);
+  `,
 ];
 
 export function runMigrations(db: DatabaseSync): void {

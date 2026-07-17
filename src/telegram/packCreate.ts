@@ -2,22 +2,29 @@ import type { Bot, InputFile } from "grammy";
 import { GrammyError } from "grammy";
 import type { MyContext } from "../bot/context.js";
 import type { InputSticker } from "@grammyjs/types";
+import { mapLimit } from "../utils/concurrency.js";
+import { raiseGlobalFlood, waitGlobalFlood, reserveGlobalSlot } from "./globalLimiter.js";
 
 const MAX_SET_NAME_LEN = 64;
 const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
-const THROTTLE_MS = 700;
-const CONCURRENCY = 1;
+// Each add now carries its own upload (attach://), so pace it like the old
+// upload spacing (~1/s per user) rather than the old faster add-only throttle.
+const ADD_THROTTLE_MS = 1100;
+const ADD_CONCURRENCY = 1;
 const API_TIMEOUT_MS = 25_000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+interface FloodGate {
+  checkCancel?: () => void;
+  onFloodWait?: (secondsLeft: number) => void;
 }
 
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
+function raiseFloodGate(_gate: FloodGate, retryAfterSec: number): void {
+  raiseGlobalFlood(retryAfterSec);
+}
+
+async function waitFloodGate(gate: FloodGate): Promise<void> {
+  await waitGlobalFlood(gate.checkCancel, gate.onFloodWait);
 }
 
 class ApiTimeoutError extends Error {
@@ -72,9 +79,14 @@ export function generateSetName(
   return name;
 }
 
-export function buildPackTitle(sourceTitle: string, hex: string, botUsername: string): string {
+export function buildPackTitle(
+  sourceTitle: string,
+  hex: string,
+  botUsername: string,
+  colorLabel?: string,
+): string {
   const suffix = ` (via @${botUsername})`;
-  const colorPart = ` • #${hex.replace(/^#/, "")}`;
+  const colorPart = colorLabel ? ` • ${colorLabel}` : ` • #${hex.replace(/^#/, "")}`;
   const budget = MAX_TITLE_LEN - suffix.length - colorPart.length;
   const trimmedTitle = sourceTitle.slice(0, Math.max(1, budget));
   return `${trimmedTitle}${colorPart}${suffix}`.slice(0, MAX_TITLE_LEN);
@@ -90,16 +102,19 @@ export interface CreateRecoloredPackParams {
   userId: number;
   sourceSetName: string;
   sourceTitle: string;
+  /** Slug-safe color tag for the set name: bare hex for solid, preset id for gradients. */
   hex: string;
+  /** Human label for the pack title (e.g. "🌅 Закат"); falls back to #hex. */
+  colorLabel?: string;
   items: RecolorItem[];
   onProgress?: (done: number, total: number) => Promise<void> | void;
-  onUploadProgress?: (done: number, total: number) => Promise<void> | void;
   onSetCreated?: (setName: string) => void;
   checkCancel?: () => void;
+  onFloodWait?: (secondsLeft: number) => void;
 }
 
-function toInputSticker(fileId: string, item: RecolorItem): InputSticker<InputFile> {
-  return { sticker: fileId, format: item.format, emoji_list: [item.emoji] };
+function toInputSticker(item: RecolorItem): InputSticker<InputFile> {
+  return { sticker: item.input, format: item.format, emoji_list: [item.emoji] };
 }
 
 export async function createRecoloredPack(
@@ -109,22 +124,15 @@ export async function createRecoloredPack(
   const me = await withTimeout(bot.api.getMe(), "getMe");
   const botUsername = me.username;
   const items = params.items.slice(0, SET_CAP);
+  const gate: FloodGate = {
+    checkCancel: params.checkCancel,
+    onFloodWait: params.onFloodWait,
+  };
 
   let setName = generateSetName(params.sourceSetName, params.hex, botUsername);
-  const title = buildPackTitle(params.sourceTitle, params.hex, botUsername);
+  const title = buildPackTitle(params.sourceTitle, params.hex, botUsername, params.colorLabel);
 
-  const uploadedFileIds: string[] = [];
-  for (const item of items) {
-    params.checkCancel?.();
-    const t0 = Date.now();
-    const uploaded = await uploadWithRetry(bot, params.userId, item);
-    const ms = Date.now() - t0;
-    console.log(`[upload] ${item.emoji} ${item.input?.constructor?.name ?? ""} took ${ms}ms -> ${uploaded.file_id.slice(0, 12)}`);
-    uploadedFileIds.push(uploaded.file_id);
-    await params.onUploadProgress?.(uploadedFileIds.length, items.length);
-    await sleep(THROTTLE_MS);
-  }
-
+  let skipped = 0;
   const first = items[0];
   if (!first) throw new Error("No items to create pack from");
 
@@ -133,12 +141,14 @@ export async function createRecoloredPack(
   let timeoutRetries = 0;
   for (;;) {
     try {
+      await waitFloodGate(gate);
+      await reserveGlobalSlot(ADD_THROTTLE_MS);
       await withTimeout(
         bot.api.createNewStickerSet(
           params.userId,
           setName,
           title,
-          [toInputSticker(uploadedFileIds[0]!, first)],
+          [toInputSticker(first)],
           { sticker_type: "custom_emoji" },
         ),
         "createNewStickerSet",
@@ -149,10 +159,11 @@ export async function createRecoloredPack(
         timeoutRetries++;
         continue;
       }
-      if (err instanceof GrammyError && err.error_code === 429 && rateLimitRetries < 3) {
+      if (err instanceof GrammyError && err.error_code === 429 && rateLimitRetries < 4) {
         rateLimitRetries++;
-        const retryAfter = (err.parameters?.retry_after ?? 1) * 1000 + 500;
-        await sleep(retryAfter);
+        const retryAfter = err.parameters?.retry_after ?? 5;
+        console.warn(`[create] rate limited, flood gate up for ${retryAfter}s`);
+        raiseFloodGate(gate, retryAfter);
         continue;
       }
       const occupied = err instanceof GrammyError && /occupied|already/i.test(err.description);
@@ -167,12 +178,13 @@ export async function createRecoloredPack(
           params.hex,
           botUsername,
         );
+        await reserveGlobalSlot(ADD_THROTTLE_MS);
         await withTimeout(
           bot.api.createNewStickerSet(
             params.userId,
             setName,
             title,
-            [toInputSticker(uploadedFileIds[0]!, first)],
+            [toInputSticker(first)],
             { sticker_type: "custom_emoji" },
           ),
           "createNewStickerSet",
@@ -184,93 +196,53 @@ export async function createRecoloredPack(
   }
   params.onSetCreated?.(setName);
   await params.onProgress?.(1, items.length);
-  await sleep(THROTTLE_MS);
 
-  let skipped = 0;
-  for (const batch of chunk(items.slice(1), CONCURRENCY)) {
+  // Adds append to one set: keep ADD_CONCURRENCY = 1 to preserve emoji order.
+  let addedCount = 1;
+  await mapLimit(items.slice(1), ADD_CONCURRENCY, async (item) => {
     params.checkCancel?.();
-    const results = await Promise.all(
-      batch.map(async (item) => {
-        const idx = items.indexOf(item);
-        params.checkCancel?.();
-        try {
-          await addWithRetry(bot, params.userId, setName, uploadedFileIds[idx]!, item);
-          return true;
-        } catch (err) {
-          console.error(`addStickerToSet failed for ${item.emoji}:`, err);
-          return false;
-        }
-      }),
-    );
-    for (const ok of results) if (!ok) skipped++;
-    const done = items.length - skipped;
-    await params.onProgress?.(Math.min(done, items.length), items.length);
-    await sleep(THROTTLE_MS);
-  }
+    try {
+      await addWithRetry(bot, params.userId, setName, item, gate);
+      addedCount++;
+    } catch (err) {
+      skipped++;
+      console.error(`addStickerToSet failed for ${item.emoji}:`, err);
+    }
+    await params.onProgress?.(addedCount, items.length);
+  });
 
   return { setName, title, skipped };
-}
-
-async function uploadWithRetry(
-  bot: Bot<MyContext>,
-  userId: number,
-  item: RecolorItem,
-): Promise<{ file_id: string }> {
-  const RATE_LIMIT_RETRIES = 3;
-  for (let timeoutRetries = 0, rateLimitRetries = 0; ; ) {
-    try {
-      return await withTimeout(
-        bot.api.uploadStickerFile(userId, item.format, item.input),
-        "uploadStickerFile",
-      );
-    } catch (err) {
-      if (err instanceof ApiTimeoutError && timeoutRetries < 2) {
-        timeoutRetries++;
-        continue;
-      }
-      if (err instanceof GrammyError && err.error_code === 429 && rateLimitRetries < RATE_LIMIT_RETRIES) {
-        rateLimitRetries++;
-        const retryAfter = (err.parameters?.retry_after ?? 1) * 1000 + 500;
-        await sleep(retryAfter);
-        return await withTimeout(
-          bot.api.uploadStickerFile(userId, item.format, item.input),
-          "uploadStickerFile",
-        );
-      }
-      throw err;
-    }
-  }
 }
 
 async function addWithRetry(
   bot: Bot<MyContext>,
   userId: number,
   setName: string,
-  fileId: string,
   item: RecolorItem,
+  gate: FloodGate,
 ): Promise<void> {
-  const RATE_LIMIT_RETRIES = 3;
-  for (let timeoutRetries = 0, rateLimitRetries = 0; ; ) {
+  const FLOOD_WAITS = 4;
+  for (let timeoutRetries = 0, floodWaits = 0; ; ) {
     try {
+      await waitFloodGate(gate);
+      await reserveGlobalSlot(ADD_THROTTLE_MS);
       await withTimeout(
-        bot.api.addStickerToSet(userId, setName, toInputSticker(fileId, item)),
+        bot.api.addStickerToSet(userId, setName, toInputSticker(item)),
         "addStickerToSet",
       );
       return;
     } catch (err) {
       if (err instanceof ApiTimeoutError && timeoutRetries < 2) {
         timeoutRetries++;
+        console.warn(`[add] ${item.emoji} timed out, retry ${timeoutRetries}/2`);
         continue;
       }
-      if (err instanceof GrammyError && err.error_code === 429 && rateLimitRetries < RATE_LIMIT_RETRIES) {
-        rateLimitRetries++;
-        const retryAfter = (err.parameters?.retry_after ?? 1) * 1000 + 500;
-        await sleep(retryAfter);
-        await withTimeout(
-          bot.api.addStickerToSet(userId, setName, toInputSticker(fileId, item)),
-          "addStickerToSet",
-        );
-        return;
+      if (err instanceof GrammyError && err.error_code === 429 && floodWaits < FLOOD_WAITS) {
+        floodWaits++;
+        const retryAfter = err.parameters?.retry_after ?? 5;
+        console.warn(`[add] ${item.emoji} rate limited, flood gate up for ${retryAfter}s (wait ${floodWaits}/${FLOOD_WAITS})`);
+        raiseFloodGate(gate, retryAfter);
+        continue;
       }
       throw err;
     }
