@@ -20,8 +20,9 @@ const EDIT_EVERY_N = 5;
 const EDIT_EVERY_MS = 3000;
 // Base covers up to two full flood-gate waits (~6 min each) on top of the work.
 const PHASE2_BASE_TIMEOUT_MS = 15 * 60_000;
-// The write bucket paces adds at ~1 per 25s; leave headroom on top.
-const PHASE2_PER_ITEM_MS = 35_000;
+// The write bucket paces adds at ~1 per 25s, but a 429 penalty can stretch
+// the interval up to 120s/write — the watchdog must outlast that.
+const PHASE2_PER_ITEM_MS = 150_000;
 // Download hits bot.api.getFile per item; batch it down to stay clear of
 // the same bot-wide flood limit that createNewStickerSet/addStickerToSet hit.
 const DOWNLOAD_CONCURRENCY = 3;

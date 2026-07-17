@@ -35,59 +35,92 @@ export async function waitGlobalFlood(
 
 // Sticker-set writes (createNewStickerSet/addStickerToSet) sit behind their
 // own undocumented server-side token bucket: a burst of ~10 goes through,
-// then even 1/s trips a 429 after ~17 writes (retry_after 118-290s). Observed
-// safe sustained rate is ~2-3 writes/min, so we pace below it proactively:
-// capacity 8, one token per 25s. penalizeStickerWrites() shrinks the refill
-// rate if a real 429 still slips through.
+// then even 1/s trips a 429 after ~17 writes (retry_after 118-290s).
+// Two prod lessons baked in (2026-07-17):
+// - the process starts with ONE token, not a full burst — a restart can't see
+//   how drained the server-side bucket already is, and a full-burst start
+//   right after a redeploy earned an instant 226s flood;
+// - a real 429 means the server bucket is empty and refilling at ~1/min, so
+//   penalize() doubles the refill interval (writes spaced 37s apart re-tripped
+//   a 429 minutes after waiting out a full retry_after) and cuts capacity so
+//   no burst fires while the server is still recovering.
 const WRITE_BUCKET_CAPACITY = 8;
-const MAX_REFILL_INTERVAL_MS = 60_000;
+const PENALIZED_CAPACITY = 3;
+const MAX_REFILL_INTERVAL_MS = 120_000;
 const PACE_POLL_MS = 5_000;
 
-let refillIntervalMs = 25_000;
-let writeTokens = WRITE_BUCKET_CAPACITY;
-let lastRefillAt = Date.now();
+export class StickerWriteBucket {
+  private capacity = WRITE_BUCKET_CAPACITY;
+  private refillIntervalMs = 25_000;
+  private tokens = 1;
+  private lastRefillAt: number;
 
-function refillWriteTokens(): void {
-  const now = Date.now();
-  writeTokens = Math.min(
-    WRITE_BUCKET_CAPACITY,
-    writeTokens + (now - lastRefillAt) / refillIntervalMs,
-  );
-  lastRefillAt = now;
+  constructor(private readonly nowFn: () => number = Date.now) {
+    this.lastRefillAt = this.nowFn();
+  }
+
+  private refill(): void {
+    const now = this.nowFn();
+    this.tokens = Math.min(
+      this.capacity,
+      this.tokens + (now - this.lastRefillAt) / this.refillIntervalMs,
+    );
+    this.lastRefillAt = now;
+  }
+
+  /**
+   * Reserves one write slot. When the bucket is empty, waits for the next
+   * token in cancellable 5s chunks, reporting seconds left via onPace.
+   */
+  async reserve(
+    checkCancel?: () => void,
+    onPace?: (secondsLeft: number) => void,
+  ): Promise<void> {
+    for (;;) {
+      checkCancel?.();
+      this.refill();
+      if (this.tokens >= 1) {
+        this.tokens -= 1;
+        return;
+      }
+      const leftMs = (1 - this.tokens) * this.refillIntervalMs;
+      onPace?.(Math.ceil(leftMs / 1000));
+      await sleep(Math.min(PACE_POLL_MS, leftMs));
+    }
+  }
+
+  /** Backstop for a real 429: drain the bucket, slow refill, forbid bursts. */
+  penalize(): void {
+    this.refill();
+    this.tokens = 0;
+    this.capacity = Math.min(this.capacity, PENALIZED_CAPACITY);
+    this.refillIntervalMs = Math.min(this.refillIntervalMs * 2, MAX_REFILL_INTERVAL_MS);
+  }
+
+  /** Estimates how long `count` writes will take at the current bucket state. */
+  estimateMs(count: number): number {
+    this.refill();
+    const paced = Math.max(0, count - Math.floor(this.tokens));
+    return paced * this.refillIntervalMs;
+  }
 }
 
-/**
- * Reserves one sticker-set write slot from the process-wide token bucket.
- * When the bucket is empty, waits for the next token in cancellable 5s chunks,
- * reporting seconds left via onPace.
- */
+const writeBucket = new StickerWriteBucket();
+
+/** Reserves one sticker-set write slot from the process-wide token bucket. */
 export async function reserveStickerWrite(
   checkCancel?: () => void,
   onPace?: (secondsLeft: number) => void,
 ): Promise<void> {
-  for (;;) {
-    checkCancel?.();
-    refillWriteTokens();
-    if (writeTokens >= 1) {
-      writeTokens -= 1;
-      return;
-    }
-    const leftMs = (1 - writeTokens) * refillIntervalMs;
-    onPace?.(Math.ceil(leftMs / 1000));
-    await sleep(Math.min(PACE_POLL_MS, leftMs));
-  }
+  return writeBucket.reserve(checkCancel, onPace);
 }
 
 /** Backstop for a real 429: drain the bucket and slow the refill rate. */
 export function penalizeStickerWrites(_retryAfterSec: number): void {
-  refillWriteTokens();
-  writeTokens = 0;
-  refillIntervalMs = Math.min(refillIntervalMs * 1.5, MAX_REFILL_INTERVAL_MS);
+  writeBucket.penalize();
 }
 
 /** Estimates how long `count` sticker-set writes will take at the current bucket state. */
 export function estimateStickerWriteMs(count: number): number {
-  refillWriteTokens();
-  const paced = Math.max(0, count - Math.floor(writeTokens));
-  return paced * refillIntervalMs;
+  return writeBucket.estimateMs(count);
 }
