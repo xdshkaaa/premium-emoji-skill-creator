@@ -8,11 +8,12 @@ import { raiseGlobalFlood, waitGlobalFlood, reserveGlobalSlot } from "./globalLi
 const MAX_SET_NAME_LEN = 64;
 const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
-// Telegram's real per-user sticker-set write bucket is stricter than 1/s once
-// a pack runs long: 1100ms still triggers ~260-290s flood waits every few
-// dozen items. Back off harder to stay under the bucket for the whole pack.
-const ADD_THROTTLE_MS = 3000;
-const ADD_CONCURRENCY = 1;
+// Proactive per-call spacing (1.1s, then 3s) still tripped Telegram's
+// per-user sticker-set write bucket every few dozen items (~260-290s flood
+// waits). Switch to fire concurrently and back off reactively on 429 instead
+// — matches how other packs bots batch (3 in flight, no fixed inter-call gap).
+const ADD_THROTTLE_MS = 250;
+const ADD_CONCURRENCY = 3;
 const API_TIMEOUT_MS = 25_000;
 
 interface FloodGate {
@@ -20,12 +21,12 @@ interface FloodGate {
   onFloodWait?: (secondsLeft: number) => void;
 }
 
-function raiseFloodGate(_gate: FloodGate, retryAfterSec: number): void {
-  raiseGlobalFlood(retryAfterSec);
+function raiseFloodGate(_gate: FloodGate, userId: number, retryAfterSec: number): void {
+  raiseGlobalFlood(userId, retryAfterSec);
 }
 
-async function waitFloodGate(gate: FloodGate): Promise<void> {
-  await waitGlobalFlood(gate.checkCancel, gate.onFloodWait);
+async function waitFloodGate(gate: FloodGate, userId: number): Promise<void> {
+  await waitGlobalFlood(userId, gate.checkCancel, gate.onFloodWait);
 }
 
 class ApiTimeoutError extends Error {
@@ -142,8 +143,8 @@ export async function createRecoloredPack(
   let timeoutRetries = 0;
   for (;;) {
     try {
-      await waitFloodGate(gate);
-      await reserveGlobalSlot(ADD_THROTTLE_MS);
+      await waitFloodGate(gate, params.userId);
+      await reserveGlobalSlot(params.userId, ADD_THROTTLE_MS);
       await withTimeout(
         bot.api.createNewStickerSet(
           params.userId,
@@ -164,7 +165,7 @@ export async function createRecoloredPack(
         rateLimitRetries++;
         const retryAfter = err.parameters?.retry_after ?? 5;
         console.warn(`[create] rate limited, flood gate up for ${retryAfter}s`);
-        raiseFloodGate(gate, retryAfter);
+        raiseFloodGate(gate, params.userId, retryAfter);
         continue;
       }
       const occupied = err instanceof GrammyError && /occupied|already/i.test(err.description);
@@ -179,7 +180,7 @@ export async function createRecoloredPack(
           params.hex,
           botUsername,
         );
-        await reserveGlobalSlot(ADD_THROTTLE_MS);
+        await reserveGlobalSlot(params.userId, ADD_THROTTLE_MS);
         await withTimeout(
           bot.api.createNewStickerSet(
             params.userId,
@@ -198,7 +199,9 @@ export async function createRecoloredPack(
   params.onSetCreated?.(setName);
   await params.onProgress?.(1, items.length);
 
-  // Adds append to one set: keep ADD_CONCURRENCY = 1 to preserve emoji order.
+  // Adds append to one live set; with ADD_CONCURRENCY > 1 completion order
+  // (not dispatch order) decides final emoji order, so order may shuffle
+  // slightly under concurrency. Traded for throughput per user request.
   let addedCount = 1;
   await mapLimit(items.slice(1), ADD_CONCURRENCY, async (item) => {
     params.checkCancel?.();
@@ -225,8 +228,8 @@ async function addWithRetry(
   const FLOOD_WAITS = 4;
   for (let timeoutRetries = 0, floodWaits = 0; ; ) {
     try {
-      await waitFloodGate(gate);
-      await reserveGlobalSlot(ADD_THROTTLE_MS);
+      await waitFloodGate(gate, userId);
+      await reserveGlobalSlot(userId, ADD_THROTTLE_MS);
       await withTimeout(
         bot.api.addStickerToSet(userId, setName, toInputSticker(item)),
         "addStickerToSet",
@@ -242,7 +245,7 @@ async function addWithRetry(
         floodWaits++;
         const retryAfter = err.parameters?.retry_after ?? 5;
         console.warn(`[add] ${item.emoji} rate limited, flood gate up for ${retryAfter}s (wait ${floodWaits}/${FLOOD_WAITS})`);
-        raiseFloodGate(gate, retryAfter);
+        raiseFloodGate(gate, userId, retryAfter);
         continue;
       }
       throw err;
