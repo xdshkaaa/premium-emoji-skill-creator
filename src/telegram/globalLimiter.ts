@@ -8,34 +8,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Telegram's sticker-set write quota (createNewStickerSet/addStickerToSet)
-// is per bot token, not per end-user: a 429 for one user's job was observed
-// blocking every other user's job at the same time. Confirmed in prod
-// 2026-07-17 — do not re-split this per user again without new evidence.
-let floodUntil = 0;
-
-/** Raises the process-wide flood gate: every caller (any user, any job) waits it out together. */
-export function raiseGlobalFlood(retryAfterSec: number): void {
-  floodUntil = Math.max(floodUntil, Date.now() + retryAfterSec * 1000 + 1000);
-}
-
-export async function waitGlobalFlood(
-  checkCancel?: () => void,
-  onWait?: (secondsLeft: number) => void,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() < floodUntil) {
-    if (Date.now() - start > MAX_FLOOD_WAIT_MS) {
-      throw new Error(`Flood wait exceeded ${MAX_FLOOD_WAIT_MS / 1000}s budget`);
-    }
-    checkCancel?.();
-    const leftMs = floodUntil - Date.now();
-    onWait?.(Math.ceil(leftMs / 1000));
-    await sleep(Math.min(FLOOD_POLL_MS, leftMs));
-  }
-  checkCancel?.();
-}
-
 // Sticker-set writes (createNewStickerSet/addStickerToSet) sit behind their
 // own undocumented server-side token bucket. Prod lessons baked in
 // (2026-07-17, retry_after values observed: 37s, 115s≈3×38, 226s≈6×38 — the
@@ -192,22 +164,53 @@ function fileStore(path: string): BucketStore {
   };
 }
 
-const writeBucket = new StickerWriteBucket(Date.now, fileStore("data/write-bucket.json"));
+/**
+ * Per-writer (per bot token) rate limiter: a proactive token bucket plus a
+ * reactive flood gate. Telegram's sticker-set write quota is per bot token,
+ * not per end-user (confirmed in prod 2026-07-17): one limiter instance
+ * covers ALL users' jobs going through that bot.
+ */
+export class WriteLimiter {
+  private floodUntil = 0;
+  private readonly bucket: StickerWriteBucket;
 
-/** Reserves one sticker-set write slot from the process-wide token bucket. */
-export async function reserveStickerWrite(
-  checkCancel?: () => void,
-  onPace?: (secondsLeft: number) => void,
-): Promise<void> {
-  return writeBucket.reserve(checkCancel, onPace);
-}
+  constructor(stateFilePath?: string) {
+    this.bucket = new StickerWriteBucket(
+      Date.now,
+      stateFilePath ? fileStore(stateFilePath) : undefined,
+    );
+  }
 
-/** Backstop for a real 429: drain the bucket and slow the refill rate. */
-export function penalizeStickerWrites(_retryAfterSec: number): void {
-  writeBucket.penalize();
-}
+  /** Raises this writer's flood gate: every job on this bot waits it out together. */
+  raiseFlood(retryAfterSec: number): void {
+    this.floodUntil = Math.max(this.floodUntil, Date.now() + retryAfterSec * 1000 + 1000);
+    this.bucket.penalize();
+  }
 
-/** Estimates how long `count` sticker-set writes will take at the current bucket state. */
-export function estimateStickerWriteMs(count: number): number {
-  return writeBucket.estimateMs(count);
+  async waitFlood(
+    checkCancel?: () => void,
+    onWait?: (secondsLeft: number) => void,
+  ): Promise<void> {
+    const start = Date.now();
+    while (Date.now() < this.floodUntil) {
+      if (Date.now() - start > MAX_FLOOD_WAIT_MS) {
+        throw new Error(`Flood wait exceeded ${MAX_FLOOD_WAIT_MS / 1000}s budget`);
+      }
+      checkCancel?.();
+      const leftMs = this.floodUntil - Date.now();
+      onWait?.(Math.ceil(leftMs / 1000));
+      await sleep(Math.min(FLOOD_POLL_MS, leftMs));
+    }
+    checkCancel?.();
+  }
+
+  /** Reserves one sticker-set write slot from this writer's token bucket. */
+  reserve(checkCancel?: () => void, onPace?: (secondsLeft: number) => void): Promise<void> {
+    return this.bucket.reserve(checkCancel, onPace);
+  }
+
+  /** Estimates how long `count` writes will take at the current bucket state. */
+  estimateMs(count: number): number {
+    return this.bucket.estimateMs(count);
+  }
 }

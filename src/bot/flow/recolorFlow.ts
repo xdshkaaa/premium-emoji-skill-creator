@@ -9,7 +9,7 @@ import { recolorSticker, MediaError } from "../../media/recolor.js";
 import { hexToHsl, type TintSpec } from "../../media/color.js";
 import { getGradientPreset } from "../../media/gradients.js";
 import { createRecoloredPack, type RecolorItem } from "../../telegram/packCreate.js";
-import { estimateStickerWriteMs } from "../../telegram/globalLimiter.js";
+import { acquireWriter, unusedWorkersFor } from "../../telegram/writerPool.js";
 import { createRecoloredPackRow, finishRecoloredPack, failRecoloredPack } from "../../db/recolorRepo.js";
 import { backToMenuKeyboard, recolorDoneKeyboard } from "../keyboards.js";
 import { E } from "../emoji.js";
@@ -109,11 +109,12 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
     }
   }
 
-  // Uploads run at the write bucket's pace, so the honest remaining time
-  // matters more than the raw counter — and a sub-minute wait must still be
-  // visible or the message looks frozen.
+  // Uploads run at the chosen writer's bucket pace, so the honest remaining
+  // time matters more than the raw counter — and a sub-minute wait must still
+  // be visible or the message looks frozen.
+  const { writer, release: releaseWriter } = acquireWriter(userId);
   function uploadEtaSuffix(remaining: number): string {
-    const ms = estimateStickerWriteMs(remaining);
+    const ms = writer.limiter.estimateMs(remaining);
     if (ms < 5_000) return "";
     if (ms < 90_000) return `, ещё ~${Math.ceil(ms / 5_000) * 5} сек`;
     return `, ещё ~${Math.ceil(ms / 60_000)} мин`;
@@ -138,6 +139,7 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
     }
   }
 
+  try {
   // Phase 1: batch download the whole pack, then batch recolor the whole pack
   const items: RecolorItem[] = [];
   const failed: { emoji: string; reason: string }[] = [];
@@ -223,8 +225,9 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
   let lastPaceText = "";
   await maybeEditProgress(0, items.length, "Загружаю в пак", uploadEtaSuffix(items.length));
   try {
-    const createPromise = createRecoloredPack(bot, {
+    const createPromise = createRecoloredPack(writer, {
       userId,
+      titleUsername: bot.botInfo.username,
       sourceSetName: staged.setName ?? staged.packTitle,
       sourceTitle: staged.packTitle,
       hex: gradient ? gradient.id : staged.hex,
@@ -279,8 +282,12 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
     const skippedTotal = failed.length + result.skipped;
     const skippedLine =
       skippedTotal > 0 ? `\n\nПропущено ${skippedTotal} из-за ошибок.` : "";
+    const idleWorkers = unusedWorkersFor(userId);
+    const speedHint = idleWorkers.length
+      ? `\n\n⚡ Хочешь заливать несколько паков параллельно? Нажми /start у ${idleWorkers.map((u) => `@${u}`).join(", ")} — и следующие паки поедут одновременно.`
+      : "";
     await editFinal(
-      `${E.check} Готово! <a href="https://t.me/addemoji/${result.setName}">Новый пак</a> создан из ${items.length - result.skipped} эмодзи.${skippedLine}`,
+      `${E.check} Готово! <a href="https://t.me/addemoji/${result.setName}">Новый пак</a> создан из ${items.length - result.skipped} эмодзи.${skippedLine}${speedHint}`,
       { ...HTML, reply_markup: recolorDoneKeyboard(rowId) },
     );
   } catch (err) {
@@ -288,7 +295,7 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
       failRecoloredPack(rowId);
       if (createdSetName) {
         try {
-          await bot.api.deleteStickerSet(createdSetName);
+          await writer.api.deleteStickerSet(createdSetName);
         } catch (cleanupErr) {
           console.error("Failed to clean up cancelled sticker set:", cleanupErr);
         }
@@ -302,5 +309,8 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
       ...HTML,
       reply_markup: backToMenuKeyboard(),
     });
+  }
+  } finally {
+    releaseWriter();
   }
 }

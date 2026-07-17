@@ -26,6 +26,10 @@ if (!ffmpegOk) {
 
 await bot.api.setMyCommands([{ command: "start", description: "Меню" }]);
 
+const { initWriterPool } = await import("./telegram/writerPool.js");
+const me = await bot.api.getMe();
+await initWriterPool(bot.api, me.username);
+
 console.log("Bot starting (long polling)...");
 bot.start({
   onStart: (info) => console.log(`Bot @${info.username} is running.`),

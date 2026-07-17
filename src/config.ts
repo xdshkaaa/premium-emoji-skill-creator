@@ -2,6 +2,9 @@ import { z } from "zod";
 
 const envSchema = z.object({
   BOT_TOKEN: z.string().min(1, "BOT_TOKEN missing"),
+  // Comma-separated helper-bot tokens: each adds ~1.5 sticker-writes/min of
+  // parallel pack-upload capacity (Telegram's write quota is per bot token).
+  WORKER_BOT_TOKENS: z.string().default(""),
   GITHUB_TOKEN: z.string().min(1, "GITHUB_TOKEN missing"),
   GITHUB_SKILLS_REPO: z
     .string()
@@ -25,7 +28,10 @@ function loadConfig() {
     process.exit(1);
   }
   const [githubOwner, githubRepo] = parsed.data.GITHUB_SKILLS_REPO.split("/");
-  return { ...parsed.data, githubOwner: githubOwner!, githubRepo: githubRepo! };
+  const workerBotTokens = parsed.data.WORKER_BOT_TOKENS.split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return { ...parsed.data, githubOwner: githubOwner!, githubRepo: githubRepo!, workerBotTokens };
 }
 
 export const config = loadConfig();

@@ -77,6 +77,15 @@ const MIGRATIONS: string[] = [
   DROP INDEX IF EXISTS idx_recolored_user;
   CREATE INDEX idx_recolored_user ON recolored_packs(tg_user_id);
   `,
+  // v4: worker-bot opt-ins (a worker can create packs only for users who /start-ed it)
+  `
+  CREATE TABLE worker_optins (
+    tg_user_id INTEGER NOT NULL,
+    worker_username TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (tg_user_id, worker_username)
+  );
+  `,
 ];
 
 export function runMigrations(db: DatabaseSync): void {

@@ -26,6 +26,11 @@ DB_PATH=data/bot.sqlite
 5. (Optional, for AI color picking on recolor) set `AI_API_KEY` — the button is hidden
    without it. Recolor also needs `ffmpeg`/`ffprobe` on `$PATH` for video (webm) emoji;
    without them video emoji are skipped and reported, static/animated still work.
+6. (Optional, faster parallel pack uploads) `WORKER_BOT_TOKENS=token1,token2,...` —
+   helper bots created via @BotFather. Telegram caps sticker-set writes at
+   ~1.5/min **per bot token**, so each worker adds that much parallel capacity.
+   A worker can only create packs for users who pressed /start on it (the master
+   bot suggests this after a finished pack); pack links become `_by_<worker>`.
 
 ## Run locally
 

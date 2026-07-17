@@ -1,37 +1,22 @@
-import type { Bot, InputFile } from "grammy";
+import type { InputFile } from "grammy";
 import { GrammyError, HttpError } from "grammy";
-import type { MyContext } from "../bot/context.js";
 import type { InputSticker } from "@grammyjs/types";
-import {
-  raiseGlobalFlood,
-  waitGlobalFlood,
-  reserveStickerWrite,
-  penalizeStickerWrites,
-} from "./globalLimiter.js";
+import type { PackWriter } from "./writerPool.js";
 
 const MAX_SET_NAME_LEN = 64;
 const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
-// Sticker-set writes are paced by the process-wide token bucket in
-// globalLimiter.ts (reserveStickerWrite): reactive pacing — even batches of 5
-// per minute — kept tripping Telegram's write quota with 118-290s flood
-// waits, so every create/add reserves a token first and 429s are only a
-// backstop that also shrinks the bucket's refill rate.
+// Sticker-set writes are paced by the chosen writer's token bucket
+// (WriteLimiter): reactive pacing — even batches of 5 per minute — kept
+// tripping Telegram's write quota with 118-290s flood waits, so every
+// create/add reserves a token first and 429s are only a backstop that also
+// shrinks the bucket's refill rate.
 const API_TIMEOUT_MS = 25_000;
 
 interface FloodGate {
   checkCancel?: () => void;
   onFloodWait?: (secondsLeft: number) => void;
   onPace?: (secondsLeft: number) => void;
-}
-
-function raiseFloodGate(_gate: FloodGate, retryAfterSec: number): void {
-  raiseGlobalFlood(retryAfterSec);
-  penalizeStickerWrites(retryAfterSec);
-}
-
-async function waitFloodGate(gate: FloodGate): Promise<void> {
-  await waitGlobalFlood(gate.checkCancel, gate.onFloodWait);
 }
 
 // Transient network failures (VPS DNS blips, EAI_AGAIN) killed whole jobs in
@@ -132,6 +117,8 @@ export interface CreateRecoloredPackParams {
   onFloodWait?: (secondsLeft: number) => void;
   /** Fires while proactively waiting for a write token (normal pacing, not a 429). */
   onPace?: (secondsLeft: number) => void;
+  /** Username shown in the human-readable pack title (the master bot's brand). */
+  titleUsername: string;
 }
 
 function toInputSticker(item: RecolorItem): InputSticker<InputFile> {
@@ -139,11 +126,12 @@ function toInputSticker(item: RecolorItem): InputSticker<InputFile> {
 }
 
 export async function createRecoloredPack(
-  bot: Bot<MyContext>,
+  writer: PackWriter,
   params: CreateRecoloredPackParams,
 ): Promise<{ setName: string; title: string; skipped: number }> {
-  const me = await withTimeout(bot.api.getMe(), "getMe");
-  const botUsername = me.username;
+  // Set names MUST end with _by_<creating bot>; the title keeps the master
+  // bot's brand regardless of which worker does the writes.
+  const botUsername = writer.username;
   const items = params.items.slice(0, SET_CAP);
   const gate: FloodGate = {
     checkCancel: params.checkCancel,
@@ -152,7 +140,7 @@ export async function createRecoloredPack(
   };
 
   let setName = generateSetName(params.sourceSetName, params.hex, botUsername);
-  const title = buildPackTitle(params.sourceTitle, params.hex, botUsername, params.colorLabel);
+  const title = buildPackTitle(params.sourceTitle, params.hex, params.titleUsername, params.colorLabel);
 
   let skipped = 0;
   const first = items[0];
@@ -164,10 +152,10 @@ export async function createRecoloredPack(
   let netRetries = 0;
   for (;;) {
     try {
-      await waitFloodGate(gate);
-      await reserveStickerWrite(gate.checkCancel, gate.onPace);
+      await writer.limiter.waitFlood(gate.checkCancel, gate.onFloodWait);
+      await writer.limiter.reserve(gate.checkCancel, gate.onPace);
       await withTimeout(
-        bot.api.createNewStickerSet(
+        writer.api.createNewStickerSet(
           params.userId,
           setName,
           title,
@@ -190,8 +178,8 @@ export async function createRecoloredPack(
       if (err instanceof GrammyError && err.error_code === 429 && rateLimitRetries < 4) {
         rateLimitRetries++;
         const retryAfter = err.parameters?.retry_after ?? 5;
-        console.warn(`[create] rate limited, flood gate up for ${retryAfter}s`);
-        raiseFloodGate(gate, retryAfter);
+        console.warn(`[create] @${botUsername} rate limited, flood gate up for ${retryAfter}s`);
+        writer.limiter.raiseFlood(retryAfter);
         continue;
       }
       const occupied = err instanceof GrammyError && /occupied|already/i.test(err.description);
@@ -206,9 +194,9 @@ export async function createRecoloredPack(
           params.hex,
           botUsername,
         );
-        await reserveStickerWrite(gate.checkCancel, gate.onPace);
+        await writer.limiter.reserve(gate.checkCancel, gate.onPace);
         await withTimeout(
-          bot.api.createNewStickerSet(
+          writer.api.createNewStickerSet(
             params.userId,
             setName,
             title,
@@ -231,7 +219,7 @@ export async function createRecoloredPack(
   for (const item of items.slice(1)) {
     params.checkCancel?.();
     try {
-      await addWithRetry(bot, params.userId, setName, item, gate);
+      await addWithRetry(writer, params.userId, setName, item, gate);
       addedCount++;
     } catch (err) {
       skipped++;
@@ -244,7 +232,7 @@ export async function createRecoloredPack(
 }
 
 async function addWithRetry(
-  bot: Bot<MyContext>,
+  writer: PackWriter,
   userId: number,
   setName: string,
   item: RecolorItem,
@@ -253,10 +241,10 @@ async function addWithRetry(
   const FLOOD_WAITS = 4;
   for (let timeoutRetries = 0, floodWaits = 0, netRetries = 0; ; ) {
     try {
-      await waitFloodGate(gate);
-      await reserveStickerWrite(gate.checkCancel, gate.onPace);
+      await writer.limiter.waitFlood(gate.checkCancel, gate.onFloodWait);
+      await writer.limiter.reserve(gate.checkCancel, gate.onPace);
       await withTimeout(
-        bot.api.addStickerToSet(userId, setName, toInputSticker(item)),
+        writer.api.addStickerToSet(userId, setName, toInputSticker(item)),
         "addStickerToSet",
       );
       return;
@@ -274,8 +262,8 @@ async function addWithRetry(
       if (err instanceof GrammyError && err.error_code === 429 && floodWaits < FLOOD_WAITS) {
         floodWaits++;
         const retryAfter = err.parameters?.retry_after ?? 5;
-        console.warn(`[add] ${item.emoji} rate limited, flood gate up for ${retryAfter}s (wait ${floodWaits}/${FLOOD_WAITS})`);
-        raiseFloodGate(gate, retryAfter);
+        console.warn(`[add] @${writer.username} ${item.emoji} rate limited, flood gate up for ${retryAfter}s (wait ${floodWaits}/${FLOOD_WAITS})`);
+        writer.limiter.raiseFlood(retryAfter);
         continue;
       }
       throw err;
