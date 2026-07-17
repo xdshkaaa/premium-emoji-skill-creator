@@ -11,9 +11,9 @@ const SET_CAP = 200;
 // Proactive per-call spacing (1.1s, then 3s) still tripped Telegram's
 // per-user sticker-set write bucket every few dozen items (~260-290s flood
 // waits). Switch to fire concurrently and back off reactively on 429 instead
-// — matches how other packs bots batch (3 in flight, no fixed inter-call gap).
+// — matches how other packs bots batch (5 in flight, no fixed inter-call gap).
 const ADD_THROTTLE_MS = 250;
-const ADD_CONCURRENCY = 3;
+const ADD_CONCURRENCY = 5;
 const API_TIMEOUT_MS = 25_000;
 
 interface FloodGate {
