@@ -8,4 +8,5 @@ export const E = {
   check: '<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji>',
   warn: '<tg-emoji emoji-id="5870931487146119264">❗️</tg-emoji>',
   box: '<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji>',
+  brush: '<tg-emoji emoji-id="5870601874175954911">🖌</tg-emoji>',
 };

@@ -5,6 +5,7 @@ import { upsertUser, getSkillsForUser, getSkillById } from "../../db/repo.js";
 import { config } from "../../config.js";
 import { E } from "../emoji.js";
 import { mainMenuKeyboard, backToMenuKeyboard } from "../keyboards.js";
+import { setPendingRecolor } from "../pendingInput.js";
 
 const HTML = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
 
@@ -105,6 +106,16 @@ export function registerStartHandlers(bot: Bot<MyContext>): void {
     await ctx.answerCallbackQuery();
     if (!ctx.from) return;
     await showSkillCard(ctx, ctx.from.id, Number(ctx.match[1]));
+  });
+
+  bot.callbackQuery("menu:recolor", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!ctx.from) return;
+    setPendingRecolor(ctx.from.id);
+    await ctx.editMessageText(
+      `${E.brush} <b>Перекраска пака.</b> Пришли ссылку на пак премиум-эмодзи (https://t.me/addemoji/ИмяПака) — сразу перейдём к выбору цвета.`,
+      { ...HTML, reply_markup: backToMenuKeyboard() },
+    );
   });
 
   bot.callbackQuery("menu:help", async (ctx) => {

@@ -7,7 +7,7 @@ import { extractAddEmojiSetName } from "../../telegram/extract.js";
 import { processPack, type PackPayload } from "../flow/buildSkill.js";
 import { runRecolorJob } from "../flow/recolorFlow.js";
 import { getStagedPack, stageColorChoice, getStagedColorChoice } from "../flow/recolorStore.js";
-import { setPending, takePendingHex, clearPending } from "../pendingInput.js";
+import { setPending, takePendingHex } from "../pendingInput.js";
 import { getRecoloredPackById } from "../../db/recolorRepo.js";
 import { colorMenuKeyboard, gradientMenuKeyboard, confirmRecolorKeyboard, backToMenuKeyboard } from "../keyboards.js";
 import { getGradientPreset } from "../../media/gradients.js";
@@ -171,9 +171,10 @@ export async function handlePendingHexMessage(ctx: MyContext): Promise<boolean> 
   if (!ctx.from || !ctx.message?.text) return false;
   const text = ctx.message.text;
 
-  // A new pack link always takes precedence and clears any pending color prompt.
+  // A new pack link always takes precedence and clears any pending color prompt
+  // (recolor intent from the menu stays: packInput consumes it).
   if (extractAddEmojiSetName(text)) {
-    clearPending(ctx.from.id);
+    takePendingHex(ctx.from.id);
     return false;
   }
 

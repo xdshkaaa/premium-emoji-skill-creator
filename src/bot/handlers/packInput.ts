@@ -6,8 +6,10 @@ import { retryPublish } from "../flow/buildSkill.js";
 import { requestCancel, isRunning } from "../flow/cancellation.js";
 import { stagePack } from "../flow/recolorStore.js";
 import { handlePendingHexMessage } from "./recolor.js";
+import { takePendingRecolor } from "../pendingInput.js";
 import { upsertUser } from "../../db/repo.js";
-import { packChoiceKeyboard } from "../keyboards.js";
+import { packChoiceKeyboard, colorMenuKeyboard } from "../keyboards.js";
+import { config } from "../../config.js";
 import { E } from "../emoji.js";
 
 const HTML = { parse_mode: "HTML" as const };
@@ -61,6 +63,13 @@ export function registerPackInputHandlers(bot: Bot<MyContext>): void {
         packTitle: resolved.title,
         stickers: resolved.stickers,
       });
+      if (takePendingRecolor(ctx.from.id)) {
+        await ctx.reply(`${E.brush} Выбери цвет для пака «<b>${resolved.title}</b>»:`, {
+          ...HTML,
+          reply_markup: colorMenuKeyboard(token, !!config.AI_API_KEY),
+        });
+        return;
+      }
       await ctx.reply(
         `${E.box} Пак «<b>${resolved.title}</b>» — ${resolved.stickers.length} эмодзи. Что делаем?`,
         { ...HTML, reply_markup: packChoiceKeyboard(token) },

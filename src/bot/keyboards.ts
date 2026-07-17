@@ -9,6 +9,7 @@ const ICON = {
   box: "5870528606328852614",
   eyes: "5870903672937911120",
   check: "5870633910337015697",
+  brush: "5870601874175954911",
 };
 
 export function retryPublishKeyboard(skillId: number): InlineKeyboard {
@@ -24,6 +25,9 @@ export function mainMenuKeyboard(isAdmin = false): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text("Мои скиллы", "menu:skills")
     .icon(ICON.box)
+    .row()
+    .text("Перекраска", "menu:recolor")
+    .icon(ICON.brush)
     .row()
     .text("Как это работает", "menu:help")
     .icon(ICON.eyes);
