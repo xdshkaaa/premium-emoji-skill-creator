@@ -34,24 +34,24 @@ export async function waitGlobalFlood(
 }
 
 // Sticker-set writes (createNewStickerSet/addStickerToSet) sit behind their
-// own undocumented server-side token bucket: a burst of ~10 goes through,
-// then even 1/s trips a 429 after ~17 writes (retry_after 118-290s).
-// Two prod lessons baked in (2026-07-17):
+// own undocumented server-side token bucket. Prod lessons baked in
+// (2026-07-17, retry_after values observed: 37s, 115s≈3×38, 226s≈6×38 — the
+// server refills ~1 token/38-40s and retry_after is deficit × that interval):
+// - the client refill interval must exceed the server's ~40s one; 25s and
+//   even 37s spacing both re-tripped 429s, so the base is 45s;
 // - the process starts with ONE token, not a full burst — a restart can't see
 //   how drained the server-side bucket already is, and a full-burst start
 //   right after a redeploy earned an instant 226s flood;
-// - a real 429 means the server bucket is empty and refilling at ~1/min, so
-//   penalize() doubles the refill interval (writes spaced 37s apart re-tripped
-//   a 429 minutes after waiting out a full retry_after) and cuts capacity so
-//   no burst fires while the server is still recovering.
-const WRITE_BUCKET_CAPACITY = 8;
+// - a real 429 means the server bucket is empty, so penalize() doubles the
+//   refill interval and cuts capacity so no burst fires while it recovers.
+const WRITE_BUCKET_CAPACITY = 5;
 const PENALIZED_CAPACITY = 3;
 const MAX_REFILL_INTERVAL_MS = 120_000;
 const PACE_POLL_MS = 5_000;
 
 export class StickerWriteBucket {
   private capacity = WRITE_BUCKET_CAPACITY;
-  private refillIntervalMs = 25_000;
+  private refillIntervalMs = 45_000;
   private tokens = 1;
   private lastRefillAt: number;
 
