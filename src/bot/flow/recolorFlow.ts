@@ -9,6 +9,7 @@ import { recolorSticker, MediaError } from "../../media/recolor.js";
 import { hexToHsl, type TintSpec } from "../../media/color.js";
 import { getGradientPreset } from "../../media/gradients.js";
 import { createRecoloredPack, type RecolorItem } from "../../telegram/packCreate.js";
+import { estimateStickerWriteMs } from "../../telegram/globalLimiter.js";
 import { createRecoloredPackRow, finishRecoloredPack, failRecoloredPack } from "../../db/recolorRepo.js";
 import { backToMenuKeyboard, recolorDoneKeyboard } from "../keyboards.js";
 import { E } from "../emoji.js";
@@ -19,7 +20,8 @@ const EDIT_EVERY_N = 5;
 const EDIT_EVERY_MS = 3000;
 // Base covers up to two full flood-gate waits (~6 min each) on top of the work.
 const PHASE2_BASE_TIMEOUT_MS = 15 * 60_000;
-const PHASE2_PER_ITEM_MS = 5_000;
+// The write bucket paces adds at ~1 per 25s; leave headroom on top.
+const PHASE2_PER_ITEM_MS = 35_000;
 // Download hits bot.api.getFile per item; batch it down to stay clear of
 // the same bot-wide flood limit that createNewStickerSet/addStickerToSet hit.
 const DOWNLOAD_CONCURRENCY = 3;
@@ -80,7 +82,12 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
 
   let lastEditAt = Date.now();
   let lastEditCount = 0;
-  async function maybeEditProgress(done: number, total: number, label: string): Promise<void> {
+  async function maybeEditProgress(
+    done: number,
+    total: number,
+    label: string,
+    suffix = "",
+  ): Promise<void> {
     const now = Date.now();
     if (done - lastEditCount < EDIT_EVERY_N && now - lastEditAt < EDIT_EVERY_MS && done !== total) {
       return;
@@ -91,7 +98,7 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
       await ctx.api.editMessageText(
         progressMsg.chat.id,
         progressMsg.message_id,
-        `${E.box} ${label}: <b>${done}</b>/${total}…`,
+        `${E.box} ${label}: <b>${done}</b>/${total}${suffix}…`,
         cancelKeyboardHtml(userId),
       );
     } catch (err) {
@@ -99,6 +106,14 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
         console.error("Progress edit failed:", err);
       }
     }
+  }
+
+  // Uploads run at the write bucket's pace (~1 add / 25s), so the honest
+  // remaining time matters more than the raw counter.
+  function uploadEtaSuffix(remaining: number): string {
+    const ms = estimateStickerWriteMs(remaining);
+    if (ms < 60_000) return "";
+    return `, ещё ~${Math.ceil(ms / 60_000)} мин`;
   }
 
   // Phase 1: batch download the whole pack, then batch recolor the whole pack
@@ -189,7 +204,9 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
   // Phase 2: create the new pack
   let createdSetName: string | undefined;
   lastEditCount = 0;
-  await maybeEditProgress(0, items.length, "Загружаю в пак");
+  let uploadedCount = 0;
+  let lastPaceText = "";
+  await maybeEditProgress(0, items.length, "Загружаю в пак", uploadEtaSuffix(items.length));
   try {
     const createPromise = createRecoloredPack(bot, {
       userId,
@@ -201,8 +218,23 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
       onSetCreated: (setName) => {
         createdSetName = setName;
       },
-      onProgress: (done, total) => maybeEditProgress(done, total, "Загружаю в пак"),
+      onProgress: (done, total) => {
+        uploadedCount = done;
+        return maybeEditProgress(done, total, "Загружаю в пак", uploadEtaSuffix(total - done));
+      },
       checkCancel: () => throwIfCancelled(userId),
+      // Proactive bucket pacing: keep the same progress line, just refresh the ETA.
+      onPace: () => {
+        const now = Date.now();
+        if (now - lastEditAt < EDIT_EVERY_MS) return;
+        const text = `${E.box} Загружаю в пак: <b>${uploadedCount}</b>/${items.length}${uploadEtaSuffix(items.length - uploadedCount)}…`;
+        if (text === lastPaceText) return;
+        lastPaceText = text;
+        lastEditAt = now;
+        ctx.api
+          .editMessageText(progressMsg.chat.id, progressMsg.message_id, text, cancelKeyboardHtml(userId))
+          .catch(() => {});
+      },
       onFloodWait: (secondsLeft) => {
         const now = Date.now();
         if (now - lastEditAt < EDIT_EVERY_MS) return;

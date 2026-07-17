@@ -2,28 +2,32 @@ import type { Bot, InputFile } from "grammy";
 import { GrammyError } from "grammy";
 import type { MyContext } from "../bot/context.js";
 import type { InputSticker } from "@grammyjs/types";
-import { raiseGlobalFlood, waitGlobalFlood, reserveGlobalSlot } from "./globalLimiter.js";
+import {
+  raiseGlobalFlood,
+  waitGlobalFlood,
+  reserveStickerWrite,
+  penalizeStickerWrites,
+} from "./globalLimiter.js";
 
 const MAX_SET_NAME_LEN = 64;
 const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
-// Proactive per-call spacing (1.1s, then 3s) still tripped Telegram's
-// per-user sticker-set write bucket every few dozen items (~260-290s flood
-// waits) — it's a count/window quota, not a rate. Fire a batch of
-// ADD_CONCURRENCY concurrently, then wait out the rest of the minute before
-// the next batch, so the write count per rolling window stays low.
-const ADD_THROTTLE_MS = 250;
-const ADD_CONCURRENCY = 5;
-const ADD_BATCH_INTERVAL_MS = 60_000;
+// Sticker-set writes are paced by the process-wide token bucket in
+// globalLimiter.ts (reserveStickerWrite): reactive pacing — even batches of 5
+// per minute — kept tripping Telegram's write quota with 118-290s flood
+// waits, so every create/add reserves a token first and 429s are only a
+// backstop that also shrinks the bucket's refill rate.
 const API_TIMEOUT_MS = 25_000;
 
 interface FloodGate {
   checkCancel?: () => void;
   onFloodWait?: (secondsLeft: number) => void;
+  onPace?: (secondsLeft: number) => void;
 }
 
 function raiseFloodGate(_gate: FloodGate, retryAfterSec: number): void {
   raiseGlobalFlood(retryAfterSec);
+  penalizeStickerWrites(retryAfterSec);
 }
 
 async function waitFloodGate(gate: FloodGate): Promise<void> {
@@ -114,6 +118,8 @@ export interface CreateRecoloredPackParams {
   onSetCreated?: (setName: string) => void;
   checkCancel?: () => void;
   onFloodWait?: (secondsLeft: number) => void;
+  /** Fires while proactively waiting for a write token (normal pacing, not a 429). */
+  onPace?: (secondsLeft: number) => void;
 }
 
 function toInputSticker(item: RecolorItem): InputSticker<InputFile> {
@@ -130,6 +136,7 @@ export async function createRecoloredPack(
   const gate: FloodGate = {
     checkCancel: params.checkCancel,
     onFloodWait: params.onFloodWait,
+    onPace: params.onPace,
   };
 
   let setName = generateSetName(params.sourceSetName, params.hex, botUsername);
@@ -145,7 +152,7 @@ export async function createRecoloredPack(
   for (;;) {
     try {
       await waitFloodGate(gate);
-      await reserveGlobalSlot(ADD_THROTTLE_MS);
+      await reserveStickerWrite(gate.checkCancel, gate.onPace);
       await withTimeout(
         bot.api.createNewStickerSet(
           params.userId,
@@ -181,7 +188,7 @@ export async function createRecoloredPack(
           params.hex,
           botUsername,
         );
-        await reserveGlobalSlot(ADD_THROTTLE_MS);
+        await reserveStickerWrite(gate.checkCancel, gate.onPace);
         await withTimeout(
           bot.api.createNewStickerSet(
             params.userId,
@@ -200,35 +207,19 @@ export async function createRecoloredPack(
   params.onSetCreated?.(setName);
   await params.onProgress?.(1, items.length);
 
-  // Adds append to one live set; within a batch, completion order (not
-  // dispatch order) decides final emoji order, so order may shuffle slightly
-  // inside each batch. Batches of ADD_CONCURRENCY fire once per
-  // ADD_BATCH_INTERVAL_MS to stay clear of Telegram's per-user write quota.
+  // Sequential adds: the write bucket sets the pace anyway, and dispatch
+  // order = final emoji order (concurrent adds shuffled it).
   let addedCount = 1;
-  const rest = items.slice(1);
-  for (let i = 0; i < rest.length; i += ADD_CONCURRENCY) {
-    const batchStart = Date.now();
-    const batch = rest.slice(i, i + ADD_CONCURRENCY);
-    await Promise.all(
-      batch.map(async (item) => {
-        params.checkCancel?.();
-        try {
-          await addWithRetry(bot, params.userId, setName, item, gate);
-          addedCount++;
-        } catch (err) {
-          skipped++;
-          console.error(`addStickerToSet failed for ${item.emoji}:`, err);
-        }
-        await params.onProgress?.(addedCount, items.length);
-      }),
-    );
-    const hasMore = i + ADD_CONCURRENCY < rest.length;
-    if (hasMore) {
-      params.checkCancel?.();
-      const elapsed = Date.now() - batchStart;
-      const remaining = ADD_BATCH_INTERVAL_MS - elapsed;
-      if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  for (const item of items.slice(1)) {
+    params.checkCancel?.();
+    try {
+      await addWithRetry(bot, params.userId, setName, item, gate);
+      addedCount++;
+    } catch (err) {
+      skipped++;
+      console.error(`addStickerToSet failed for ${item.emoji}:`, err);
     }
+    await params.onProgress?.(addedCount, items.length);
   }
 
   return { setName, title, skipped };
@@ -245,7 +236,7 @@ async function addWithRetry(
   for (let timeoutRetries = 0, floodWaits = 0; ; ) {
     try {
       await waitFloodGate(gate);
-      await reserveGlobalSlot(ADD_THROTTLE_MS);
+      await reserveStickerWrite(gate.checkCancel, gate.onPace);
       await withTimeout(
         bot.api.addStickerToSet(userId, setName, toInputSticker(item)),
         "addStickerToSet",
