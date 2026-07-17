@@ -8,9 +8,10 @@ import { raiseGlobalFlood, waitGlobalFlood, reserveGlobalSlot } from "./globalLi
 const MAX_SET_NAME_LEN = 64;
 const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
-// Each add now carries its own upload (attach://), so pace it like the old
-// upload spacing (~1/s per user) rather than the old faster add-only throttle.
-const ADD_THROTTLE_MS = 1100;
+// Telegram's real per-user sticker-set write bucket is stricter than 1/s once
+// a pack runs long: 1100ms still triggers ~260-290s flood waits every few
+// dozen items. Back off harder to stay under the bucket for the whole pack.
+const ADD_THROTTLE_MS = 3000;
 const ADD_CONCURRENCY = 1;
 const API_TIMEOUT_MS = 25_000;
 
