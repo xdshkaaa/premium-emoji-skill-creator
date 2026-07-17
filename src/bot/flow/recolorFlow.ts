@@ -1,5 +1,5 @@
 import type { Bot } from "grammy";
-import { InputFile, GrammyError } from "grammy";
+import { InputFile, GrammyError, HttpError } from "grammy";
 import type { MyContext } from "../context.js";
 import type { StagedColorChoice } from "./recolorStore.js";
 import { isRunning, startRun, endRun, throwIfCancelled, CancelledError } from "./cancellation.js";
@@ -20,7 +20,7 @@ const EDIT_EVERY_N = 5;
 const EDIT_EVERY_MS = 3000;
 // Base covers up to two full flood-gate waits (~6 min each) on top of the work.
 const PHASE2_BASE_TIMEOUT_MS = 15 * 60_000;
-// The write bucket paces adds at ~1 per 25s, but a 429 penalty can stretch
+// The write bucket paces adds at ~1 per 40s, but a 429 penalty can stretch
 // the interval up to 120s/write — the watchdog must outlast that.
 const PHASE2_PER_ITEM_MS = 150_000;
 // Download hits bot.api.getFile per item; batch it down to stay clear of
@@ -109,12 +109,33 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
     }
   }
 
-  // Uploads run at the write bucket's pace (~1 add / 25s), so the honest
-  // remaining time matters more than the raw counter.
+  // Uploads run at the write bucket's pace, so the honest remaining time
+  // matters more than the raw counter — and a sub-minute wait must still be
+  // visible or the message looks frozen.
   function uploadEtaSuffix(remaining: number): string {
     const ms = estimateStickerWriteMs(remaining);
-    if (ms < 60_000) return "";
+    if (ms < 5_000) return "";
+    if (ms < 90_000) return `, ещё ~${Math.ceil(ms / 5_000) * 5} сек`;
     return `, ещё ~${Math.ceil(ms / 60_000)} мин`;
+  }
+
+  // Terminal status edits must never crash the job: the pack may already be
+  // created, and a VPS network blip (EAI_AGAIN in prod) is retryable.
+  async function editFinal(text: string, replyMarkup: Parameters<typeof ctx.api.editMessageText>[3]): Promise<void> {
+    for (let netRetries = 0; ; ) {
+      try {
+        await ctx.api.editMessageText(progressMsg.chat.id, progressMsg.message_id, text, replyMarkup);
+        return;
+      } catch (err) {
+        if (err instanceof HttpError && netRetries < 3) {
+          netRetries++;
+          await new Promise((resolve) => setTimeout(resolve, 10_000));
+          continue;
+        }
+        console.error("Final status edit failed:", err);
+        return;
+      }
+    }
   }
 
   // Phase 1: batch download the whole pack, then batch recolor the whole pack
@@ -180,12 +201,7 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
   } catch (err) {
     if (err instanceof CancelledError) {
       failRecoloredPack(rowId);
-      await ctx.api.editMessageText(
-        progressMsg.chat.id,
-        progressMsg.message_id,
-        `${E.warn} Отменено.`,
-        { ...HTML, reply_markup: backToMenuKeyboard() },
-      );
+      await editFinal(`${E.warn} Отменено.`, { ...HTML, reply_markup: backToMenuKeyboard() });
       return;
     }
     throw err;
@@ -193,12 +209,10 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
 
   if (items.length === 0) {
     failRecoloredPack(rowId);
-    await ctx.api.editMessageText(
-      progressMsg.chat.id,
-      progressMsg.message_id,
-      `${E.warn} Не удалось перекрасить ни одного эмодзи. Прерываю.`,
-      { ...HTML, reply_markup: backToMenuKeyboard() },
-    );
+    await editFinal(`${E.warn} Не удалось перекрасить ни одного эмодзи. Прерываю.`, {
+      ...HTML,
+      reply_markup: backToMenuKeyboard(),
+    });
     return;
   }
 
@@ -265,9 +279,7 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
     const skippedTotal = failed.length + result.skipped;
     const skippedLine =
       skippedTotal > 0 ? `\n\nПропущено ${skippedTotal} из-за ошибок.` : "";
-    await ctx.api.editMessageText(
-      progressMsg.chat.id,
-      progressMsg.message_id,
+    await editFinal(
       `${E.check} Готово! <a href="https://t.me/addemoji/${result.setName}">Новый пак</a> создан из ${items.length - result.skipped} эмодзи.${skippedLine}`,
       { ...HTML, reply_markup: recolorDoneKeyboard(rowId) },
     );
@@ -281,21 +293,14 @@ async function run(bot: Bot<MyContext>, ctx: MyContext, staged: StagedColorChoic
           console.error("Failed to clean up cancelled sticker set:", cleanupErr);
         }
       }
-      await ctx.api.editMessageText(
-        progressMsg.chat.id,
-        progressMsg.message_id,
-        `${E.warn} Отменено.`,
-        { ...HTML, reply_markup: backToMenuKeyboard() },
-      );
+      await editFinal(`${E.warn} Отменено.`, { ...HTML, reply_markup: backToMenuKeyboard() });
       return;
     }
     console.error("Create recolored pack failed:", err);
     failRecoloredPack(rowId);
-    await ctx.api.editMessageText(
-      progressMsg.chat.id,
-      progressMsg.message_id,
-      `${E.warn} Не удалось создать пак в Telegram.`,
-      { ...HTML, reply_markup: backToMenuKeyboard() },
-    );
+    await editFinal(`${E.warn} Не удалось создать пак в Telegram.`, {
+      ...HTML,
+      reply_markup: backToMenuKeyboard(),
+    });
   }
 }

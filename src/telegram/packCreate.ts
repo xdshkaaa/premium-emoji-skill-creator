@@ -1,5 +1,5 @@
 import type { Bot, InputFile } from "grammy";
-import { GrammyError } from "grammy";
+import { GrammyError, HttpError } from "grammy";
 import type { MyContext } from "../bot/context.js";
 import type { InputSticker } from "@grammyjs/types";
 import {
@@ -32,6 +32,18 @@ function raiseFloodGate(_gate: FloodGate, retryAfterSec: number): void {
 
 async function waitFloodGate(gate: FloodGate): Promise<void> {
   await waitGlobalFlood(gate.checkCancel, gate.onFloodWait);
+}
+
+// Transient network failures (VPS DNS blips, EAI_AGAIN) killed whole jobs in
+// prod — wait out the blip instead of failing the item.
+const NET_RETRY_DELAY_MS = 15_000;
+const NET_RETRIES = 3;
+
+async function waitOutNetworkBlip(gate: FloodGate, label: string, attempt: number): Promise<void> {
+  console.warn(`[net] ${label} network error, retry ${attempt}/${NET_RETRIES} in ${NET_RETRY_DELAY_MS / 1000}s`);
+  gate.checkCancel?.();
+  await new Promise((resolve) => setTimeout(resolve, NET_RETRY_DELAY_MS));
+  gate.checkCancel?.();
 }
 
 class ApiTimeoutError extends Error {
@@ -149,6 +161,7 @@ export async function createRecoloredPack(
   let attempt = 0;
   let rateLimitRetries = 0;
   let timeoutRetries = 0;
+  let netRetries = 0;
   for (;;) {
     try {
       await waitFloodGate(gate);
@@ -167,6 +180,11 @@ export async function createRecoloredPack(
     } catch (err) {
       if (err instanceof ApiTimeoutError && timeoutRetries < 2) {
         timeoutRetries++;
+        continue;
+      }
+      if (err instanceof HttpError && netRetries < NET_RETRIES) {
+        netRetries++;
+        await waitOutNetworkBlip(gate, "createNewStickerSet", netRetries);
         continue;
       }
       if (err instanceof GrammyError && err.error_code === 429 && rateLimitRetries < 4) {
@@ -233,7 +251,7 @@ async function addWithRetry(
   gate: FloodGate,
 ): Promise<void> {
   const FLOOD_WAITS = 4;
-  for (let timeoutRetries = 0, floodWaits = 0; ; ) {
+  for (let timeoutRetries = 0, floodWaits = 0, netRetries = 0; ; ) {
     try {
       await waitFloodGate(gate);
       await reserveStickerWrite(gate.checkCancel, gate.onPace);
@@ -246,6 +264,11 @@ async function addWithRetry(
       if (err instanceof ApiTimeoutError && timeoutRetries < 2) {
         timeoutRetries++;
         console.warn(`[add] ${item.emoji} timed out, retry ${timeoutRetries}/2`);
+        continue;
+      }
+      if (err instanceof HttpError && netRetries < NET_RETRIES) {
+        netRetries++;
+        await waitOutNetworkBlip(gate, `addStickerToSet ${item.emoji}`, netRetries);
         continue;
       }
       if (err instanceof GrammyError && err.error_code === 429 && floodWaits < FLOOD_WAITS) {

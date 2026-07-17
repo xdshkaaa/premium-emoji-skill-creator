@@ -1,3 +1,6 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
 const FLOOD_POLL_MS = 5_000;
 const MAX_FLOOD_WAIT_MS = 6 * 60_000;
 
@@ -47,21 +50,81 @@ export async function waitGlobalFlood(
 //   refill interval and cuts capacity so no burst fires while it recovers.
 const WRITE_BUCKET_CAPACITY = 5;
 const PENALIZED_CAPACITY = 3;
+const BASE_REFILL_INTERVAL_MS = 40_000;
 const MAX_REFILL_INTERVAL_MS = 120_000;
+// A 429 penalty is not forever: every clean 10 minutes halves the interval
+// back toward base (one noon flood must not slow evening packs).
+const PENALTY_DECAY_MS = 10 * 60_000;
 const PACE_POLL_MS = 5_000;
+
+/** Persists the bucket across restarts so a redeploy neither bursts into a
+ * drained server quota nor forgets tokens accumulated while idle. */
+export interface BucketStore {
+  load(): string | undefined;
+  save(serialized: string): void;
+}
 
 export class StickerWriteBucket {
   private capacity = WRITE_BUCKET_CAPACITY;
-  private refillIntervalMs = 40_000;
+  private refillIntervalMs = BASE_REFILL_INTERVAL_MS;
   private tokens = 1;
   private lastRefillAt: number;
+  private lastPenaltyAt: number;
 
-  constructor(private readonly nowFn: () => number = Date.now) {
+  constructor(
+    private readonly nowFn: () => number = Date.now,
+    private readonly store?: BucketStore,
+  ) {
     this.lastRefillAt = this.nowFn();
+    this.lastPenaltyAt = this.lastRefillAt;
+    const serialized = this.store?.load();
+    if (!serialized) return;
+    try {
+      const s = JSON.parse(serialized) as Record<string, number>;
+      if (
+        typeof s.tokens === "number" &&
+        typeof s.refillIntervalMs === "number" &&
+        typeof s.lastRefillAt === "number"
+      ) {
+        this.tokens = Math.min(WRITE_BUCKET_CAPACITY, Math.max(0, s.tokens));
+        this.refillIntervalMs = Math.min(
+          MAX_REFILL_INTERVAL_MS,
+          Math.max(BASE_REFILL_INTERVAL_MS, s.refillIntervalMs),
+        );
+        this.capacity = this.refillIntervalMs > BASE_REFILL_INTERVAL_MS
+          ? PENALIZED_CAPACITY
+          : WRITE_BUCKET_CAPACITY;
+        this.lastRefillAt = Math.min(this.lastRefillAt, s.lastRefillAt);
+        this.lastPenaltyAt = Math.min(this.lastPenaltyAt, s.lastPenaltyAt ?? this.lastRefillAt);
+      }
+    } catch {
+      // corrupt state file — keep conservative defaults
+    }
+  }
+
+  private persist(): void {
+    this.store?.save(
+      JSON.stringify({
+        tokens: this.tokens,
+        refillIntervalMs: this.refillIntervalMs,
+        lastRefillAt: this.lastRefillAt,
+        lastPenaltyAt: this.lastPenaltyAt,
+      }),
+    );
   }
 
   private refill(): void {
     const now = this.nowFn();
+    while (
+      this.refillIntervalMs > BASE_REFILL_INTERVAL_MS &&
+      now - this.lastPenaltyAt >= PENALTY_DECAY_MS
+    ) {
+      this.refillIntervalMs = Math.max(BASE_REFILL_INTERVAL_MS, this.refillIntervalMs / 2);
+      this.lastPenaltyAt += PENALTY_DECAY_MS;
+      if (this.refillIntervalMs === BASE_REFILL_INTERVAL_MS) {
+        this.capacity = WRITE_BUCKET_CAPACITY;
+      }
+    }
     this.tokens = Math.min(
       this.capacity,
       this.tokens + (now - this.lastRefillAt) / this.refillIntervalMs,
@@ -82,6 +145,7 @@ export class StickerWriteBucket {
       this.refill();
       if (this.tokens >= 1) {
         this.tokens -= 1;
+        this.persist();
         return;
       }
       const leftMs = (1 - this.tokens) * this.refillIntervalMs;
@@ -96,6 +160,8 @@ export class StickerWriteBucket {
     this.tokens = 0;
     this.capacity = Math.min(this.capacity, PENALIZED_CAPACITY);
     this.refillIntervalMs = Math.min(this.refillIntervalMs * 2, MAX_REFILL_INTERVAL_MS);
+    this.lastPenaltyAt = this.nowFn();
+    this.persist();
   }
 
   /** Estimates how long `count` writes will take at the current bucket state. */
@@ -106,7 +172,27 @@ export class StickerWriteBucket {
   }
 }
 
-const writeBucket = new StickerWriteBucket();
+function fileStore(path: string): BucketStore {
+  return {
+    load() {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return undefined;
+      }
+    },
+    save(serialized: string) {
+      try {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, serialized);
+      } catch (err) {
+        console.error("Failed to persist write-bucket state:", err);
+      }
+    },
+  };
+}
+
+const writeBucket = new StickerWriteBucket(Date.now, fileStore("data/write-bucket.json"));
 
 /** Reserves one sticker-set write slot from the process-wide token bucket. */
 export async function reserveStickerWrite(
