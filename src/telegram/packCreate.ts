@@ -2,7 +2,6 @@ import type { Bot, InputFile } from "grammy";
 import { GrammyError } from "grammy";
 import type { MyContext } from "../bot/context.js";
 import type { InputSticker } from "@grammyjs/types";
-import { mapLimit } from "../utils/concurrency.js";
 import { raiseGlobalFlood, waitGlobalFlood, reserveGlobalSlot } from "./globalLimiter.js";
 
 const MAX_SET_NAME_LEN = 64;
@@ -10,10 +9,12 @@ const MAX_TITLE_LEN = 64;
 const SET_CAP = 200;
 // Proactive per-call spacing (1.1s, then 3s) still tripped Telegram's
 // per-user sticker-set write bucket every few dozen items (~260-290s flood
-// waits). Switch to fire concurrently and back off reactively on 429 instead
-// — matches how other packs bots batch (5 in flight, no fixed inter-call gap).
+// waits) — it's a count/window quota, not a rate. Fire a batch of
+// ADD_CONCURRENCY concurrently, then wait out the rest of the minute before
+// the next batch, so the write count per rolling window stays low.
 const ADD_THROTTLE_MS = 250;
 const ADD_CONCURRENCY = 5;
+const ADD_BATCH_INTERVAL_MS = 60_000;
 const API_TIMEOUT_MS = 25_000;
 
 interface FloodGate {
@@ -199,21 +200,36 @@ export async function createRecoloredPack(
   params.onSetCreated?.(setName);
   await params.onProgress?.(1, items.length);
 
-  // Adds append to one live set; with ADD_CONCURRENCY > 1 completion order
-  // (not dispatch order) decides final emoji order, so order may shuffle
-  // slightly under concurrency. Traded for throughput per user request.
+  // Adds append to one live set; within a batch, completion order (not
+  // dispatch order) decides final emoji order, so order may shuffle slightly
+  // inside each batch. Batches of ADD_CONCURRENCY fire once per
+  // ADD_BATCH_INTERVAL_MS to stay clear of Telegram's per-user write quota.
   let addedCount = 1;
-  await mapLimit(items.slice(1), ADD_CONCURRENCY, async (item) => {
-    params.checkCancel?.();
-    try {
-      await addWithRetry(bot, params.userId, setName, item, gate);
-      addedCount++;
-    } catch (err) {
-      skipped++;
-      console.error(`addStickerToSet failed for ${item.emoji}:`, err);
+  const rest = items.slice(1);
+  for (let i = 0; i < rest.length; i += ADD_CONCURRENCY) {
+    const batchStart = Date.now();
+    const batch = rest.slice(i, i + ADD_CONCURRENCY);
+    await Promise.all(
+      batch.map(async (item) => {
+        params.checkCancel?.();
+        try {
+          await addWithRetry(bot, params.userId, setName, item, gate);
+          addedCount++;
+        } catch (err) {
+          skipped++;
+          console.error(`addStickerToSet failed for ${item.emoji}:`, err);
+        }
+        await params.onProgress?.(addedCount, items.length);
+      }),
+    );
+    const hasMore = i + ADD_CONCURRENCY < rest.length;
+    if (hasMore) {
+      params.checkCancel?.();
+      const elapsed = Date.now() - batchStart;
+      const remaining = ADD_BATCH_INTERVAL_MS - elapsed;
+      if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
     }
-    await params.onProgress?.(addedCount, items.length);
-  });
+  }
 
   return { setName, title, skipped };
 }
