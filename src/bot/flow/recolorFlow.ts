@@ -20,7 +20,11 @@ const EDIT_EVERY_MS = 3000;
 // Base covers up to two full flood-gate waits (~6 min each) on top of the work.
 const PHASE2_BASE_TIMEOUT_MS = 15 * 60_000;
 const PHASE2_PER_ITEM_MS = 5_000;
-const DOWNLOAD_CONCURRENCY = 8;
+// Download hits bot.api.getFile per item; batch it down to stay clear of
+// the same bot-wide flood limit that createNewStickerSet/addStickerToSet hit.
+const DOWNLOAD_CONCURRENCY = 3;
+// Recolor is pure CPU, no Telegram API calls — concurrency here is unrelated
+// to rate limits.
 const RECOLOR_CONCURRENCY = 4;
 
 function cancelKeyboardHtml(userId: number) {
