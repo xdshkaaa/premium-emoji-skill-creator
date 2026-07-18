@@ -41,7 +41,7 @@ ssh user@ip
 node -v            # need Node 22+ (built-in node:sqlite, no native build)
 mkdir -p /opt/premium-skill-tg
 # from your machine: rsync -av --exclude node_modules --exclude data --exclude .env \
-#   ./ root@103.214.69.38:/opt/premium-skill-tg/
+#   ./ root@YOUR_VPS_IP:/opt/premium-skill-tg/
 cd /opt/premium-skill-tg
 npm ci
 vim .env            # fill in real values, see above
