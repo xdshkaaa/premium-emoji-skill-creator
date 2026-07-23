@@ -41,6 +41,18 @@ export function backToMenuKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("В меню", "menu:back").icon(ICON.back);
 }
 
+export function collectKeyboard(count: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(`Готово (${count})`, "col:done")
+    .icon(ICON.check)
+    .row()
+    .text("Сбросить", "col:reset")
+    .icon(ICON.eyes)
+    .row()
+    .text("В меню", "menu:back")
+    .icon(ICON.back);
+}
+
 export function packChoiceKeyboard(token: string): InlineKeyboard {
   return new InlineKeyboard()
     .text("Создать скилл", `pk:skill:${token}`)

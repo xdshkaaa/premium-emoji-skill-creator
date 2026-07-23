@@ -8,6 +8,16 @@ export function extractAddEmojiSetName(text: string | undefined): string | null 
   return match ? match[1]! : null;
 }
 
+// custom_emoji_id values are long numeric strings; lookarounds keep us from
+// slicing pieces out of longer digit runs (phone numbers, etc.).
+const EMOJI_ID_RE = /(?<!\d)\d{15,20}(?!\d)/g;
+
+export function extractCustomEmojiIdList(text: string | undefined): string[] {
+  if (!text) return [];
+  const matches = text.match(EMOJI_ID_RE) ?? [];
+  return [...new Set(matches)];
+}
+
 export function extractCustomEmojiIds(message: Message): string[] {
   const entities: MessageEntity[] = [
     ...(message.entities ?? []),

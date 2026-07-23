@@ -80,7 +80,10 @@ export function hslToRgb(hsl: Hsl): { r: number; g: number; b: number } {
   };
 }
 
-/** Tints one pixel: keeps original lightness, replaces hue+saturation with the target's. */
+/** Tints one pixel: replaces hue+saturation with the target's and compresses
+ *  lightness so pure white lands exactly on the target color (a white source at
+ *  l=1 would otherwise stay white — hue/sat are invisible at full lightness).
+ *  Monotone Reinhard-style curve: identity near black, l=1 → target.l. */
 export function tintPixel(
   r: number,
   g: number,
@@ -88,7 +91,9 @@ export function tintPixel(
   target: Hsl,
 ): { r: number; g: number; b: number } {
   const { l } = rgbToHsl(r, g, b);
-  return hslToRgb({ h: target.h, s: target.s, l });
+  const lmax = target.l;
+  const compressed = lmax <= 0 ? 0 : l / (1 + l * (1 / lmax - 1));
+  return hslToRgb({ h: target.h, s: target.s, l: compressed });
 }
 
 /** In-place tint of an RGBA(or RGB) buffer. `channels` is 3 or 4; alpha (if present) is untouched. */

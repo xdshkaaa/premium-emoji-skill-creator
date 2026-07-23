@@ -113,7 +113,7 @@ export function registerStartHandlers(bot: Bot<MyContext>): void {
     if (!ctx.from) return;
     setPendingRecolor(ctx.from.id);
     await ctx.editMessageText(
-      `${E.brush} <b>Перекраска пака.</b> Пришли ссылку на пак премиум-эмодзи (https://t.me/addemoji/ИмяПака) — сразу перейдём к выбору цвета.`,
+      `${E.brush} <b>Перекраска.</b> Пришли ссылку на пак премиум-эмодзи (https://t.me/addemoji/ИмяПака) — сразу перейдём к выбору цвета.\n\nИли собери свой набор: перешли сообщения с нужными премиум-эмодзи (можно несколько подряд) либо пришли список их ID текстом, затем жми «Готово».`,
       { ...HTML, reply_markup: backToMenuKeyboard() },
     );
   });
